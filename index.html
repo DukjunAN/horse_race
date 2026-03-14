@@ -40,8 +40,8 @@
 </div>
 
 <script>
-// 로컬: 비워두면 현재 주소(localhost:3000 등)로 소켓 연결. 배포 시 Netlify+Render 쓰면 window.SOCKET_URL 또는 여기 직접 입력 (예: 'https://your-app.onrender.com')
-const SOCKET_URL = window.SOCKET_URL || '';
+// ---------- Netlify 배포 시: Render 서버 주소 ----------
+const SOCKET_URL = window.SOCKET_URL || 'https://horse-race-qo6o.onrender.com';
 
 const TARGET_DISTANCE = 4000;
 const COLOR_ORDER = ['red', 'blue', 'green', 'yellow'];

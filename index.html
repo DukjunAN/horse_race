@@ -54,6 +54,9 @@ class PreloadScene extends Phaser.Scene {
         for (let i = 1; i <= 4; i++) {
             this.load.image(`horse_raw${i}`, `horse${i}.png`);
         }
+        // crowd.png: 현재 페이지와 같은 폴더 기준으로 로드 (로컬/배포 동일하게)
+        const crowdUrl = new URL('crowd.png?v=2', window.location.href).href;
+        this.load.image('crowd', crowdUrl);
         this.load.once('loaderror', () => {});
     }
     create() {
@@ -76,13 +79,29 @@ class TitleScene extends Phaser.Scene {
         const btnStart = document.getElementById('btn-game-start');
         input.value = localStorage.getItem('horse_nickname') || '';
         btnStart.onclick = () => {
+            // 이미 서버 연결 시도 중이면 중복 클릭 무시
+            if (window.gameState && window.gameState.connecting) return;
+
             const nickname = (input.value || '').trim().slice(0, 20) || 'Player';
             localStorage.setItem('horse_nickname', nickname);
-            window.gameState = { nickname };
+            window.gameState = window.gameState || {};
+            window.gameState.nickname = nickname;
+            window.gameState.connecting = true;
+
+            // 중복 접속 방지: 버튼 비활성화 + 안내 문구
+            const originalText = btnStart.dataset.originalText || btnStart.textContent;
+            btnStart.dataset.originalText = originalText;
+            btnStart.disabled = true;
+            btnStart.textContent = '서버 연결 대기중...';
+
             const socket = io(SOCKET_URL || window.location.origin);
             socket.emit('set_nickname', nickname);
             socket.emit('create_or_join');
             socket.once('your_info', (data) => {
+                window.gameState.connecting = false;
+                btnStart.disabled = false;
+                btnStart.textContent = btnStart.dataset.originalText || '게임 시작';
+
                 window.gameState.socket = socket;
                 window.gameState.myColor = data.color;
                 window.gameState.myNickname = data.nickname;
@@ -90,9 +109,14 @@ class TitleScene extends Phaser.Scene {
                 window.gameState.players = data.players || [];
                 this.scene.start('Lobby', data);
             });
-            socket.once('error', (err) => {
-                alert(err.message || '접속 실패');
-            });
+            const onError = (err) => {
+                window.gameState.connecting = false;
+                btnStart.disabled = false;
+                btnStart.textContent = btnStart.dataset.originalText || '게임 시작';
+                alert((err && err.message) || '서버 연결에 실패했습니다.\n잠시 후 다시 시도해 주세요.');
+            };
+            socket.once('error', onError);
+            socket.once('connect_error', onError);
         };
     }
 }
@@ -162,7 +186,6 @@ class GameScene extends Phaser.Scene {
         const { width, height } = scene.scale;
         const scaleY = height / 960;
         const laneHeight = Math.round(100 * scaleY);
-        const startY = Math.round(150 * scaleY);
 
         // 말 텍스처/애니 (기존 로직)
         for (let i = 1; i <= 4; i++) {
@@ -183,14 +206,48 @@ class GameScene extends Phaser.Scene {
             }
         }
 
-        const trackTop = Math.round(110 * scaleY);
-        const trackH = Math.round(450 * scaleY);
         const fenceH = Math.round(10 * scaleY);
-        const standH = Math.round(100 * scaleY);
+        const standH = Math.round(220 * scaleY);  // 관중 세로 크게
+        const topSectionH = standH + fenceH;      // 이미지가 흰선까지 덮음
+        const trackTop = topSectionH;
+        const trackH = Math.round(450 * scaleY);
         const stripeH = Math.round(45 * scaleY);
-        // 배경: 관중석, 울타리, 흙 트랙, 레인, 결승선 (비율 유지)
-        scene.add.rectangle(width / 2, standH / 2, width, standH, 0x222222).setScrollFactor(0).setDepth(-15);
-        scene.add.rectangle(0, standH, 10000, fenceH, 0xffffff).setOrigin(0).setDepth(-12);
+        const startY = trackTop + Math.round(40 * scaleY);
+        // 배경 → 관중 이미지 → 그 위에 고정 펜스(흔들리지 않음)
+        scene.add.rectangle(width / 2, topSectionH / 2, width, topSectionH, 0x222222).setScrollFactor(0).setDepth(-15);
+        this.crowdSprite = null;
+        this.crowdFrame = 0;
+        this.crowdTick = 0;
+        const tryAddCrowd = () => {
+            if (!scene.textures.exists('crowd')) return false;
+            try {
+                const img = scene.textures.get('crowd').getSourceImage();
+                const cw = img.naturalWidth || img.width || 0;
+                const ch = img.naturalHeight || img.height || 0;
+                if (cw < 10 || ch < 20) return false;
+                // 세로를 2등분해서 2프레임으로 사용 (300+300이 아니어도 동작)
+                const frameH = Math.floor(ch / 2);
+                if (!scene.textures.exists('crowd_sheet')) {
+                    try {
+                        scene.textures.addSpriteSheet('crowd_sheet', img, { frameWidth: cw, frameHeight: frameH });
+                    } catch (e) { return false; }
+                }
+                const crowdSprite = scene.add.sprite(scene.scale.width / 2, topSectionH / 2, 'crowd_sheet', 0);
+                crowdSprite.setDisplaySize(scene.scale.width, topSectionH).setScrollFactor(0).setDepth(-12);
+                this.crowdSprite = crowdSprite;
+                this.crowdTick = 0;
+                return true;
+            } catch (e) { }
+            return false;
+        };
+        if (!tryAddCrowd()) {
+            const crowdUrl = new URL('crowd.png?v=4', window.location.href).href;
+            scene.load.image('crowd', crowdUrl);
+            scene.load.once('filecomplete', (key) => { if (key === 'crowd') tryAddCrowd(); });
+            scene.load.start();
+        }
+        // 관중 이미지 위에 고정 펜스(카메라 따라가게 해서 항상 보이게)
+        this.fenceRect = scene.add.rectangle(scene.scale.width / 2, standH + fenceH / 2, width + 100, fenceH, 0xffffff).setOrigin(0.5).setScrollFactor(0).setDepth(-11);
         scene.add.rectangle(0, trackTop, 10000, trackH, 0x8d6e63).setOrigin(0).setDepth(-10);
         for (let i = 0; i < 4; i++) {
             const y = startY + i * laneHeight;
@@ -231,22 +288,28 @@ class GameScene extends Phaser.Scene {
         this.rivals = this.horses.filter((_, i) => COLOR_ORDER[i] !== this.myColor);
 
         // 말 이미지 앞 말풍선: 별명 / 남은거리만 (속도 표기 없음)
-        const bubbleFontSize = Math.max(14, Math.round(18 * scaleY));
+        // → 말풍선과 별명을 더 크게
+        const bubbleFontSize = Math.max(18, Math.round(26 * scaleY));
         let comNum = 0;
         this.nameBubbles = [];
-        const bubbleOffsetX = Math.round(160 * scaleY);
+        const bubbleOffsetX = Math.round(170 * scaleY);
         COLOR_ORDER.forEach((color, idx) => {
             const p = (this.players || []).find((x) => x.color === color);
             const name = p ? p.nickname : 'com' + (++comNum);
             const horse = this.horses[idx];
-            const bubbleW = Math.round(120 * scaleY);
-            const bubbleH = Math.round(44 * scaleY);
+            const bubbleW = Math.round(180 * scaleY);
+            const bubbleH = Math.round(70 * scaleY);
             const bubble = scene.add.container(horse.x + bubbleOffsetX, horse.y);
-            const bg = scene.add.rectangle(0, 0, bubbleW, bubbleH, 0x2d2d2d, 0.95).setStrokeStyle(2, 0xffffff, 0.8);
-            const label = scene.add.text(0, 0, name + '\n4000m', { fontSize: bubbleFontSize + 'px', fill: '#fff', fontStyle: 'bold', align: 'center' }).setOrigin(0.5);
+            const isMine = color === this.myColor;
+            const bgColor = isMine ? 0xffc107 : 0x2d2d2d;
+            const strokeColor = isMine ? 0xffeb3b : 0xffffff;
+            const textColor = isMine ? '#000' : '#fff';
+            const displayName = isMine ? ('★ ' + name) : name;
+            const bg = scene.add.rectangle(0, 0, bubbleW, bubbleH, bgColor, 0.95).setStrokeStyle(2, strokeColor, 0.9);
+            const label = scene.add.text(0, 0, displayName + '\n4000m', { fontSize: bubbleFontSize + 'px', fill: textColor, fontStyle: 'bold', align: 'center' }).setOrigin(0.5);
             bubble.add([bg, label]);
             bubble.setDepth(25);
-            this.nameBubbles.push({ container: bubble, text: label, name: name });
+            this.nameBubbles.push({ container: bubble, text: label, name: displayName });
         });
 
         // 트랙 밑에 약간 공간 두고, 둥근 큰 RUN 버튼 (터치하기 편하게)
@@ -303,6 +366,19 @@ class GameScene extends Phaser.Scene {
         this.finishOrder.push({ color, name });
     }
     update() {
+        // 관중 2장 천천히 번갈아 표시 (약 1초 간격)
+        if (this.crowdSprite && this.crowdSprite.active) {
+            this.crowdTick = (this.crowdTick || 0) + 1;
+            if (this.crowdTick >= 55) {
+                this.crowdTick = 0;
+                this.crowdFrame = 1 - (this.crowdFrame || 0);
+                this.crowdSprite.setFrame(this.crowdFrame);
+            }
+        }
+        // 펜스가 카메라 화면에 항상 보이도록 위치 보정
+        if (this.fenceRect && this.fenceRect.active) {
+            this.fenceRect.x = this.cameras.main.scrollX + this.scale.width / 2;
+        }
         // 말풍선: 말 이미지 앞에 위치, 별명 + 남은거리만
         if (this.nameBubbles) {
             this.nameBubbles.forEach((item, idx) => {
@@ -359,15 +435,75 @@ class GameScene extends Phaser.Scene {
         const { width, height } = scene.scale;
         const isWinner = data.winnerNickname === (window.gameState && window.gameState.myNickname);
         const depth = 5000;
-        scene.add.rectangle(width / 2, height / 2, width, height, 0x000000, 0.85).setScrollFactor(0).setDepth(depth);
-        scene.add.text(width / 2, height / 2 - 80, isWinner ? '축하합니다!\n우승!' : (data.winnerNickname + ' 우승!'), { fontSize: '48px', fill: '#fff', fontStyle: 'bold', align: 'center' }).setOrigin(0.5).setScrollFactor(0).setDepth(depth + 1);
-        const btnW = 200;
-        const btnH = 56;
-        const gap = 24;
-        const btnAgain = scene.add.rectangle(width / 2 - gap / 2 - btnW / 2, height / 2 + 50, btnW, btnH, 0x43a047).setScrollFactor(0).setDepth(depth + 2).setInteractive({ useHandCursor: true });
-        scene.add.text(width / 2 - gap / 2 - btnW / 2, height / 2 + 50, '다시 하기', { fontSize: '24px', fill: '#fff', fontStyle: 'bold' }).setOrigin(0.5).setScrollFactor(0).setDepth(depth + 3);
-        const btnExit = scene.add.rectangle(width / 2 + gap / 2 + btnW / 2, height / 2 + 50, btnW, btnH, 0x757575).setScrollFactor(0).setDepth(depth + 2).setInteractive({ useHandCursor: true });
-        scene.add.text(width / 2 + gap / 2 + btnW / 2, height / 2 + 50, '나가기', { fontSize: '24px', fill: '#fff', fontStyle: 'bold' }).setOrigin(0.5).setScrollFactor(0).setDepth(depth + 3);
+        // 전체 화면 어두운 배경
+        scene.add.rectangle(width / 2, height / 2, width, height, 0x000000, 0.85)
+            .setScrollFactor(0)
+            .setDepth(depth);
+
+        // 화면 크기에 따라 아주 크게 보이는 승리 문구
+        const baseSize = Math.min(width, height);
+        const titleFontSize = Math.round(baseSize * 0.09);     // 메인 문구
+        const buttonFontSize = Math.round(baseSize * 0.045);   // 버튼 텍스트
+
+        scene.add.text(
+            width / 2,
+            height / 2 - titleFontSize,
+            isWinner ? '축하합니다!\n우승!' : (data.winnerNickname + ' 우승!'),
+            {
+                fontSize: titleFontSize + 'px',
+                fill: '#fff',
+                fontStyle: 'bold',
+                align: 'center'
+            }
+        )
+            .setOrigin(0.5)
+            .setScrollFactor(0)
+            .setDepth(depth + 1);
+
+        // 버튼도 화면 비율에 맞춰 아주 크게
+        const btnW = Math.min(width * 0.36, 420);
+        const btnH = Math.min(height * 0.10, 120);
+        const gap = Math.max(32, Math.round(width * 0.04));
+        const buttonY = height / 2 + btnH;
+
+        const btnAgainX = width / 2 - gap / 2 - btnW / 2;
+        const btnExitX = width / 2 + gap / 2 + btnW / 2;
+
+        const btnAgain = scene.add.rectangle(btnAgainX, buttonY, btnW, btnH, 0x43a047)
+            .setScrollFactor(0)
+            .setDepth(depth + 2)
+            .setInteractive({ useHandCursor: true });
+        scene.add.text(
+            btnAgainX,
+            buttonY,
+            '다시 하기',
+            {
+                fontSize: buttonFontSize + 'px',
+                fill: '#fff',
+                fontStyle: 'bold'
+            }
+        )
+            .setOrigin(0.5)
+            .setScrollFactor(0)
+            .setDepth(depth + 3);
+
+        const btnExit = scene.add.rectangle(btnExitX, buttonY, btnW, btnH, 0x757575)
+            .setScrollFactor(0)
+            .setDepth(depth + 2)
+            .setInteractive({ useHandCursor: true });
+        scene.add.text(
+            btnExitX,
+            buttonY,
+            '나가기',
+            {
+                fontSize: buttonFontSize + 'px',
+                fill: '#fff',
+                fontStyle: 'bold'
+            }
+        )
+            .setOrigin(0.5)
+            .setScrollFactor(0)
+            .setDepth(depth + 3);
         btnAgain.on('pointerdown', () => { location.reload(); });
         btnExit.on('pointerdown', () => {
             if (window.gameState && window.gameState.socket) window.gameState.socket.disconnect();
@@ -384,7 +520,7 @@ const config = {
         mode: Phaser.Scale.FIT,
         autoCenter: Phaser.Scale.CENTER_BOTH,
         width: 1280,
-        height: 1800
+        height: 2200
     },
     physics: { default: 'arcade' },
     scene: [PreloadScene, TitleScene, LobbyScene, GameScene]

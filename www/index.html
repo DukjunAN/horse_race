@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>경주마 스타트 Pro - 멀티플레이</title>
+    <link rel="manifest" href="data:application/manifest+json,{'name':'경주마스타트','short_name':'경마게임','display':'standalone','orientation':'landscape','start_url':'/','background_color':'#1a1a1a','theme_color':'#1a1a1a'}">
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser-arcade-physics.min.js"></script>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <style>
+        #game-container { width: 100%; height: 100%; }
+    </style>
+</head>
+<body>
+<div id="game-container"></div>
+<!-- Title / Lobby DOM UI (Phaser 위에 표시) -->
+<div id="ui-overlay" class="hidden">
+    <div id="title-panel" class="title-panel">
+        <h1>경주마 스타트 Pro</h1>
+        <p class="sub">멀티플레이</p>
+        <div class="nickname-wrap">
+            <input type="text" id="nickname-input" placeholder="별명 입력" maxlength="20" autocomplete="off">
+            <button type="button" class="btn-start" id="btn-game-start">게임 시작</button>
+        </div>
+    </div>
+    <div id="lobby-panel" class="lobby-panel hidden">
+        <h2>대기방</h2>
+        <div class="countdown" id="lobby-countdown"></div>
+        <p class="message" id="lobby-message">다른 참여자 대기 중...</p>
+        <ul class="player-list" id="player-list"></ul>
+        <div class="lobby-actions">
+            <button type="button" class="btn-lobby primary" id="btn-start-now">시작하기</button>
+            <button type="button" class="btn-lobby secondary" id="btn-leave">나가기</button>
+        </div>
+    </div>
+</div>
+
+<script>
+// 앱에서 사용 시: Render 등 배포된 서버 URL 입력. 로컬 테스트 시 '' 로 두고 같은 네트워크에서 서버 접속.
+const SOCKET_URL = window.SOCKET_URL || '';
+
+const TARGET_DISTANCE = 4000;
+const COLOR_ORDER = ['red', 'blue', 'green', 'yellow'];
+const HORSE_COLORS_HEX = { red: 0xe53935, blue: 0x1e88e5, green: 0x43a047, yellow: 0xfdd835 };
+
+// ========== Preload Scene ==========
+class PreloadScene extends Phaser.Scene {
+    constructor() { super({ key: 'Preload' }); }
+    preload() {
+        for (let i = 1; i <= 4; i++) {
+            this.load.image(`horse_raw${i}`, `horse${i}.png`);
+        }
+        this.load.once('loaderror', () => {});
+    }
+    create() {
+        this.scene.start('Title');
+    }
+}
+
+// ========== Title Scene ==========
+class TitleScene extends Phaser.Scene {
+    constructor() { super({ key: 'Title' }); }
+    create() {
+        const el = document.getElementById('ui-overlay');
+        const title = document.getElementById('title-panel');
+        const lobby = document.getElementById('lobby-panel');
+        el.classList.remove('hidden');
+        el.classList.add('active');
+        title.classList.remove('hidden');
+        lobby.classList.add('hidden');
+        const input = document.getElementById('nickname-input');
+        const btnStart = document.getElementById('btn-game-start');
+        input.value = localStorage.getItem('horse_nickname') || '';
+        btnStart.onclick = () => {
+            const nickname = (input.value || '').trim().slice(0, 20) || 'Player';
+            localStorage.setItem('horse_nickname', nickname);
+            window.gameState = { nickname };
+            const socket = io(SOCKET_URL || window.location.origin);
+            socket.emit('set_nickname', nickname);
+            socket.emit('create_or_join');
+            socket.once('your_info', (data) => {
+                window.gameState.socket = socket;
+                window.gameState.myColor = data.color;
+                window.gameState.myNickname = data.nickname;
+                window.gameState.isHost = data.isHost;
+                window.gameState.players = data.players || [];
+                this.scene.start('Lobby', data);
+            });
+            socket.once('error', (err) => {
+                alert(err.message || '접속 실패');
+            });
+        };
+    }
+}
+
+// ========== Lobby Scene (DOM 제어) ==========
+class LobbyScene extends Phaser.Scene {
+    constructor() { super({ key: 'Lobby' }); }
+    create(data) {
+        const title = document.getElementById('title-panel');
+        const lobby = document.getElementById('lobby-panel');
+        title.classList.add('hidden');
+        lobby.classList.remove('hidden');
+        const socket = window.gameState.socket;
+        const isHost = window.gameState.isHost;
+        const countEl = document.getElementById('lobby-countdown');
+        const msgEl = document.getElementById('lobby-message');
+        const listEl = document.getElementById('player-list');
+        const btnStartNow = document.getElementById('btn-start-now');
+        const btnLeave = document.getElementById('btn-leave');
+
+        function renderList(players) {
+            window.gameState.players = players || window.gameState.players;
+            listEl.innerHTML = (window.gameState.players || []).map(p =>
+                `<li><span class="horse-dot ${p.color}"></span> ${p.nickname}${p.isHost ? ' (방장)' : ''}</li>`
+            ).join('');
+        }
+        renderList(data.players);
+
+        socket.on('player_list', renderList);
+        socket.on('countdown', (sec) => {
+            countEl.textContent = sec > 0 ? sec : '';
+            msgEl.textContent = sec > 0 ? '다른 참여자 대기 중... ' + sec + '초 후 시작' : '곧 시작합니다!';
+        });
+        socket.once('game_start', (payload) => {
+            const overlay = document.getElementById('ui-overlay');
+            overlay.classList.add('hidden');
+            overlay.classList.remove('active');
+            this.scene.start('Game', payload);
+        });
+
+        btnStartNow.onclick = () => { if (isHost) socket.emit('start_game'); };
+        btnStartNow.style.display = isHost ? 'block' : 'none';
+        btnLeave.onclick = () => {
+            socket.emit('leave_room');
+            socket.removeAllListeners();
+            lobby.classList.add('hidden');
+            title.classList.remove('hidden');
+            document.getElementById('nickname-input').value = window.gameState.nickname || '';
+            document.getElementById('ui-overlay').classList.add('active');
+            this.scene.start('Title');
+        };
+    }
+}
+
+// ========== Game Scene ==========
+class GameScene extends Phaser.Scene {
+    constructor() { super({ key: 'Game' }); }
+    init(data) {
+        this.players = (data && data.players) || window.gameState?.players || [];
+        this.myColor = window.gameState?.myColor || 'red';
+        this.socket = window.gameState?.socket;
+        this.playerColors = new Set((this.players || []).map(p => p.color));
+    }
+    create() {
+        const scene = this;
+        const { width, height } = scene.scale;
+        const scaleY = height / 960;
+        const laneHeight = Math.round(100 * scaleY);
+        const startY = Math.round(150 * scaleY);
+
+        for (let i = 1; i <= 4; i++) {
+            if (!scene.textures.exists(`horse_raw${i}`)) continue;
+            const img = scene.textures.get(`horse_raw${i}`).getSourceImage();
+            const w = img.width, h = img.height;
+            if (w < 50 || h < 50) continue;
+            const fW = w >= 3 && h >= 3 ? Math.floor(w / 3) : w;
+            const fH = w >= 3 && h >= 3 ? Math.floor(h / 3) : h;
+            const frameCount = (w >= 3 && h >= 3) ? 9 : 1;
+            scene.textures.addSpriteSheet(`horse_sheet${i}`, img, { frameWidth: fW, frameHeight: fH });
+            if (frameCount > 1) {
+                scene.anims.create({
+                    key: `run${i}`,
+                    frames: scene.anims.generateFrameNumbers(`horse_sheet${i}`, { start: 0, end: frameCount - 1 }),
+                    frameRate: 15, repeat: -1
+                });
+            }
+        }
+
+        const trackTop = Math.round(110 * scaleY);
+        const trackH = Math.round(450 * scaleY);
+        const fenceH = Math.round(10 * scaleY);
+        const standH = Math.round(100 * scaleY);
+        const stripeH = Math.round(45 * scaleY);
+        scene.add.rectangle(width / 2, standH / 2, width, standH, 0x222222).setScrollFactor(0).setDepth(-15);
+        scene.add.rectangle(0, standH, 10000, fenceH, 0xffffff).setOrigin(0).setDepth(-12);
+        scene.add.rectangle(0, trackTop, 10000, trackH, 0x8d6e63).setOrigin(0).setDepth(-10);
+        for (let i = 0; i < 4; i++) {
+            const y = startY + i * laneHeight;
+            scene.add.rectangle(0, y + laneHeight, 10000, 2, 0xffffff, 0.3).setOrigin(0).setDepth(-5);
+            scene.add.rectangle(150, y + Math.round(50 * scaleY), 15, Math.round(80 * scaleY), 0xbdc3c7).setDepth(5);
+        }
+        const finishLineX = TARGET_DISTANCE;
+        for (let i = 0; i < 10; i++) {
+            scene.add.rectangle(finishLineX, trackTop + i * stripeH, 40, stripeH, (i % 2 === 0) ? 0xffffff : 0x000000).setOrigin(0).setDepth(-2);
+            scene.add.rectangle(finishLineX + 40, trackTop + i * stripeH, 40, stripeH, (i % 2 === 0) ? 0x000000 : 0xffffff).setOrigin(0).setDepth(-2);
+        }
+
+        const horseSize = Math.round(50 * scaleY);
+        const horseW = Math.round(80 * scaleY);
+        const horseH = Math.round(60 * scaleY);
+        this.horsePrevX = [];
+        this.horses = [];
+        const horseColors = [0xe53935, 0x1e88e5, 0x43a047, 0xfdd835];
+        for (let idx = 0; idx < 4; idx++) {
+            const y = startY + idx * laneHeight + horseSize;
+            const colorKey = COLOR_ORDER[idx];
+            let h;
+            if (scene.textures.exists(`horse_sheet${idx + 1}`)) {
+                h = scene.physics.add.sprite(250, y, `horse_sheet${idx + 1}`, 0);
+                h.setScale(0.9 * scaleY);
+            } else {
+                h = scene.add.rectangle(250, y, horseW, horseH, horseColors[idx]);
+                scene.physics.add.existing(h, true);
+            }
+            h.setDepth(10).setData({ color: colorKey, finished: false });
+            this.horses.push(h);
+            this.horsePrevX[idx] = 250;
+            if (scene.anims.exists(`run${idx + 1}`)) h.play(`run${idx + 1}`);
+        }
+
+        this.player = this.horses[COLOR_ORDER.indexOf(this.myColor)];
+        this.rivals = this.horses.filter((_, i) => COLOR_ORDER[i] !== this.myColor);
+
+        const bubbleFontSize = Math.max(14, Math.round(18 * scaleY));
+        let comNum = 0;
+        this.nameBubbles = [];
+        const bubbleOffsetX = Math.round(160 * scaleY);
+        COLOR_ORDER.forEach((color, idx) => {
+            const p = (this.players || []).find((x) => x.color === color);
+            const name = p ? p.nickname : 'com' + (++comNum);
+            const horse = this.horses[idx];
+            const bubbleW = Math.round(120 * scaleY);
+            const bubbleH = Math.round(44 * scaleY);
+            const bubble = scene.add.container(horse.x + bubbleOffsetX, horse.y);
+            const bg = scene.add.rectangle(0, 0, bubbleW, bubbleH, 0x2d2d2d, 0.95).setStrokeStyle(2, 0xffffff, 0.8);
+            const label = scene.add.text(0, 0, name + '\n4000m', { fontSize: bubbleFontSize + 'px', fill: '#fff', fontStyle: 'bold', align: 'center' }).setOrigin(0.5);
+            bubble.add([bg, label]);
+            bubble.setDepth(25);
+            this.nameBubbles.push({ container: bubble, text: label, name: name });
+        });
+
+        const trackBottom = trackTop + trackH;
+        const gapBelowTrack = Math.round(20 * scaleY);
+        const btnRadius = Math.round(130 * scaleY);
+        const btnY = trackBottom + gapBelowTrack + btnRadius;
+        const barTop = trackBottom;
+        scene.add.rectangle(width / 2, (barTop + height) / 2, width, height - barTop, 0x1a1a1a, 0.9).setScrollFactor(0).setDepth(100);
+        const touchBtn = scene.add.circle(width / 2, btnY, btnRadius, 0xff5722).setInteractive({ useHandCursor: true }).setScrollFactor(0).setDepth(101);
+        const touchFontSize = Math.round(btnRadius * 0.62);
+        scene.add.text(width / 2, btnY, '터치', { fontSize: touchFontSize + 'px', fontStyle: 'bold', fill: '#fff' }).setOrigin(0.5).setScrollFactor(0).setDepth(102);
+        touchBtn.on('pointerdown', () => {
+            if (this.player.getData('finished')) return;
+            this.player.x = Math.min(this.player.x + 60, TARGET_DISTANCE);
+            if (this.socket) this.socket.emit('horse_move', { x: this.player.x });
+        });
+
+        const fsBtn = scene.add.text(width - 60, 40, '⛶', { fontSize: '40px', fill: '#fff' }).setInteractive().setScrollFactor(0).setDepth(2000);
+        fsBtn.on('pointerdown', () => {
+            if (!scene.scale.isFullscreen) scene.scale.startFullscreen();
+            else scene.scale.stopFullscreen();
+        });
+
+        scene.cameras.main.setBounds(0, 0, TARGET_DISTANCE + 500, height);
+        this.bubbleOffsetX = Math.round(160 * scaleY);
+        scene.cameras.main.startFollow(this.player, true, 0.1, 0.1, -350, 0);
+
+        if (this.socket) {
+            this.socket.on('horse_position', (data) => {
+                const horse = this.horses[COLOR_ORDER.indexOf(data.color)];
+                if (!horse) return;
+                const isFinish = data.x >= TARGET_DISTANCE;
+                if (data.x > horse.x || isFinish) {
+                    horse.x = isFinish ? TARGET_DISTANCE : data.x;
+                    if (isFinish) {
+                        horse.setData('finished', true);
+                        if (horse.anims) horse.anims.stop();
+                        const name = (this.nameBubbles && this.nameBubbles[COLOR_ORDER.indexOf(data.color)]) ? this.nameBubbles[COLOR_ORDER.indexOf(data.color)].name : (data.nickname || data.color);
+                        this.addToFinishOrder(data.color, name);
+                    }
+                }
+            });
+            this.socket.on('race_finished', (data) => { this.showResult(data); });
+        }
+        this.syncFrameCount = 0;
+        this.finishOrder = [];
+    }
+    addToFinishOrder(color, name) {
+        if (this.finishOrder.some((e) => e.color === color)) return;
+        this.finishOrder.push({ color, name });
+    }
+    update() {
+        if (this.nameBubbles) {
+            this.nameBubbles.forEach((item, idx) => {
+                const h = this.horses[idx];
+                if (!h) return;
+                item.container.setPosition(h.x + this.bubbleOffsetX, h.y);
+                const rem = Math.max(0, Math.floor(TARGET_DISTANCE - h.x));
+                this.horsePrevX[idx] = h.x;
+                item.text.setText(item.name + '\n' + rem + 'm');
+            });
+        }
+        this.horses.forEach((h, idx) => {
+            const color = h.getData('color');
+            if (this.playerColors.has(color)) return;
+            if (h.getData('finished')) return;
+            h.x += Phaser.Math.FloatBetween(0.6, 1.2);
+            if (h.x >= TARGET_DISTANCE) {
+                h.setData('finished', true);
+                if (h.anims) h.anims.stop();
+                const name = (this.nameBubbles && this.nameBubbles[idx]) ? this.nameBubbles[idx].name : color;
+                this.addToFinishOrder(color, name);
+            }
+        });
+
+        if (this.player && this.player.x >= TARGET_DISTANCE && !this.player.getData('finished')) {
+            this.player.setData('finished', true);
+            this.player.x = TARGET_DISTANCE;
+            if (this.player.anims) this.player.anims.stop();
+            this.addToFinishOrder(this.myColor, window.gameState?.myNickname || this.myColor);
+            if (this.socket && this.finishOrder[0] && this.finishOrder[0].color === this.myColor) {
+                this.socket.emit('horse_move', { x: TARGET_DISTANCE });
+                this.socket.emit('player_finished', {});
+            }
+        }
+        const allFinished = this.horses.length > 0 && this.horses.every((h) => h.getData('finished'));
+        if (allFinished && this.finishOrder.length > 0 && !this.resultShown) {
+            const first = this.finishOrder[0];
+            const isWinner = first.color === this.myColor;
+            this.showResult({ winnerNickname: first.name, winnerColor: first.color, isWinner: isWinner });
+            return;
+        }
+        if (!this.player || this.player.getData('finished')) return;
+        this.syncFrameCount = (this.syncFrameCount || 0) + 1;
+        if (this.socket && this.syncFrameCount % 3 === 0) {
+            this.socket.emit('horse_move', { x: this.player.x });
+        }
+    }
+    showResult(data) {
+        if (this.resultShown) return;
+        this.resultShown = true;
+        if (this.socket) this.socket.removeAllListeners();
+        const scene = this;
+        const { width, height } = scene.scale;
+        const isWinner = data.winnerNickname === (window.gameState && window.gameState.myNickname);
+        const depth = 5000;
+        scene.add.rectangle(width / 2, height / 2, width, height, 0x000000, 0.85).setScrollFactor(0).setDepth(depth);
+        scene.add.text(width / 2, height / 2 - 80, isWinner ? '축하합니다!\n우승!' : (data.winnerNickname + ' 우승!'), { fontSize: '48px', fill: '#fff', fontStyle: 'bold', align: 'center' }).setOrigin(0.5).setScrollFactor(0).setDepth(depth + 1);
+        const btnW = 200;
+        const btnH = 56;
+        const gap = 24;
+        const btnAgain = scene.add.rectangle(width / 2 - gap / 2 - btnW / 2, height / 2 + 50, btnW, btnH, 0x43a047).setScrollFactor(0).setDepth(depth + 2).setInteractive({ useHandCursor: true });
+        scene.add.text(width / 2 - gap / 2 - btnW / 2, height / 2 + 50, '다시 하기', { fontSize: '24px', fill: '#fff', fontStyle: 'bold' }).setOrigin(0.5).setScrollFactor(0).setDepth(depth + 3);
+        const btnExit = scene.add.rectangle(width / 2 + gap / 2 + btnW / 2, height / 2 + 50, btnW, btnH, 0x757575).setScrollFactor(0).setDepth(depth + 2).setInteractive({ useHandCursor: true });
+        scene.add.text(width / 2 + gap / 2 + btnW / 2, height / 2 + 50, '나가기', { fontSize: '24px', fill: '#fff', fontStyle: 'bold' }).setOrigin(0.5).setScrollFactor(0).setDepth(depth + 3);
+        btnAgain.on('pointerdown', () => { location.reload(); });
+        btnExit.on('pointerdown', () => {
+            if (window.gameState && window.gameState.socket) window.gameState.socket.disconnect();
+            location.reload();
+        });
+    }
+}
+
+const config = {
+    type: Phaser.AUTO,
+    parent: 'game-container',
+    scale: {
+        mode: Phaser.Scale.FIT,
+        autoCenter: Phaser.Scale.CENTER_BOTH,
+        width: 1280,
+        height: 1800
+    },
+    physics: { default: 'arcade' },
+    scene: [PreloadScene, TitleScene, LobbyScene, GameScene]
+};
+new Phaser.Game(config);
+</script>
+</body>
+</html>

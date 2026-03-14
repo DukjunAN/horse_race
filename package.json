@@ -1,0 +1,30 @@
+{
+  "name": "horse-race-multiplayer",
+  "version": "1.0.0",
+  "description": "Real-time multiplayer horse race (Phaser3 + Socket.io)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "cap:sync": "npx cap sync",
+    "cap:android": "npx cap open android",
+    "copy:www": "node -e \"const fs=require('fs');['index.html','style.css'].forEach(f=>fs.copyFileSync(f,'www/'+f));['horse1.png','horse2.png','horse3.png','horse4.png'].forEach(f=>{if(fs.existsSync(f))fs.copyFileSync(f,'www/'+f);});\""
+  },
+  "capacitor": {
+    "includesSource": false
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "express": "^4.18.2",
+    "socket.io": "^4.7.2"
+  },
+  "devDependencies": {
+    "@capacitor/android": "^6.2.1",
+    "@capacitor/cli": "^6.2.1",
+    "@capacitor/core": "^6.2.1",
+    "dotenv": "^16.4.5"
+  }
+}

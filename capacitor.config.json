@@ -1,0 +1,8 @@
+{
+  "appId": "com.horserace.app",
+  "appName": "경주마 스타트",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https"
+  }
+}

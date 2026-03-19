@@ -238,7 +238,12 @@ class TitleScene extends Phaser.Scene {
             btnStart.disabled = true;
             btnStart.textContent = '서버 연결 대기중...';
 
-            const socket = io(SOCKET_URL || window.location.origin);
+            // Netlify(정적) + Render(소켓) 조합에서 XHR polling이 막히면 오류가 납니다.
+            // polling fallback을 끄고 websocket 전송만 사용합니다.
+            const socket = io(SOCKET_URL || window.location.origin, {
+                transports: ['websocket'],
+                upgrade: true
+            });
             socket.emit('set_nickname', nickname);
             socket.emit('create_or_join');
             socket.once('your_info', (data) => {

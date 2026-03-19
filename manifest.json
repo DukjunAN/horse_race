@@ -1,0 +1,10 @@
+{
+  "name": "경주마 스타트",
+  "short_name": "경마게임",
+  "display": "standalone",
+  "orientation": "landscape",
+  "start_url": "/",
+  "background_color": "#1a1a1a",
+  "theme_color": "#1a1a1a"
+}
+

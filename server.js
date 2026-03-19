@@ -19,6 +19,12 @@ const PORT = process.env.PORT || 3000;
 
 // 정적 파일: 로컬/통합 테스트 시 루트에서 index.html 제공. Netlify 배포 시 프론트는 Netlify에서 서빙.
 app.use(express.static(__dirname));
+// crowd.png 직접 경로 (캐시 방지용)
+app.get('/crowd.png', (req, res) => {
+  res.sendFile(path.join(__dirname, 'crowd.png'), (err) => {
+    if (err) res.status(404).end();
+  });
+});
 
 const io = new Server(server, {
   cors: { origin: '*' },
@@ -27,12 +33,42 @@ const io = new Server(server, {
 });
 
 // ========== 방·플레이어 상태 ==========
+const TARGET_DISTANCE = 8000;
 const ROOM_ID = 'lobby';
 const COLORS = ['red', 'blue', 'green', 'yellow'];
 
 const roomPlayers = new Map(); // socketId -> { nickname, color, isHost }
 let countdownTimer = null;
-let countdownSeconds = 10;
+let countdownSeconds = 5;
+let currentObstacles = [];
+
+function generateObstacles() {
+  // 장애물은 항상 최대 2개.
+  // 첫 장애물: 1000m 이상 구간에서 랜덤 (대략 1000~3500m 사이).
+  // 두 번째 장애물: 5000m 이상 구간에서 랜덤 (대략 5000~7500m 사이).
+  const result = [];
+
+  const firstMin = 1000;
+  const firstMax = Math.max(firstMin + 500, Math.floor(TARGET_DISTANCE * 0.45)); // 예: 3600m 정도
+  const secondMin = 5000;
+  const secondMax = TARGET_DISTANCE - 800; // 결승선 직전은 비워두기
+
+  // 첫 번째 장애물 (항상 생성)
+  const x1 = firstMin + Math.floor(Math.random() * Math.max(1, firstMax - firstMin));
+  result.push({
+    type: Math.random() < 0.5 ? 'hurdle' : 'water',
+    x: x1
+  });
+
+  // 두 번째 장애물 (항상 생성) – 5000m 이후에서 랜덤
+  const x2 = secondMin + Math.floor(Math.random() * Math.max(1, secondMax - secondMin));
+  result.push({
+    type: Math.random() < 0.5 ? 'hurdle' : 'water',
+    x: x2
+  });
+
+  return result;
+}
 
 function getPlayersInRoom() {
   return Array.from(roomPlayers.entries()).map(([id, data]) => ({
@@ -49,9 +85,9 @@ function getUsedColors() {
 
 function assignRandomColor() {
   const used = getUsedColors();
-  const available = COLORS.filter(c => !used.has(c));
-  if (available.length === 0) return null;
-  return available[Math.floor(Math.random() * available.length)];
+  // 점프 테스트용: 모든 플레이어를 강제로 두 번째 말(논리 색상 'blue')로 고정
+  // (horse2_jump / horse2_fail 이미지와 일치시키기 위함)
+  return 'blue';
 }
 
 function isHost(socketId) {
@@ -83,7 +119,11 @@ function startCountdown() {
     io.to(ROOM_ID).emit('countdown', sec);
     if (sec <= 0) {
       stopCountdown();
-      io.to(ROOM_ID).emit('game_start', { players: getPlayersInRoom() });
+      currentObstacles = generateObstacles();
+      io.to(ROOM_ID).emit('game_start', {
+        players: getPlayersInRoom(),
+        obstacles: currentObstacles
+      });
     }
   }, 1000);
 }
@@ -147,7 +187,11 @@ io.on('connection', (socket) => {
   socket.on('start_game', () => {
     if (!isHost(socket.id)) return;
     stopCountdown();
-    io.to(ROOM_ID).emit('game_start', { players: getPlayersInRoom() });
+    currentObstacles = generateObstacles();
+    io.to(ROOM_ID).emit('game_start', {
+      players: getPlayersInRoom(),
+      obstacles: currentObstacles
+    });
   });
 
   socket.on('horse_move', (data) => {

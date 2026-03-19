@@ -8,7 +8,7 @@
     "dev": "node server.js",
     "cap:sync": "npx cap sync",
     "cap:android": "npx cap open android",
-    "copy:www": "node -e \"const fs=require('fs');['index.html','style.css'].forEach(f=>fs.copyFileSync(f,'www/'+f));['horse1.png','horse2.png','horse3.png','horse4.png'].forEach(f=>{if(fs.existsSync(f))fs.copyFileSync(f,'www/'+f);});\""
+    "copy:www": "node -e \"const fs=require('fs');['index.html','style.css'].forEach(f=>fs.copyFileSync(f,'www/'+f));['horse1.png','horse2.png','horse3.png','horse4.png'].forEach(f=>{if(fs.existsSync(f))fs.copyFileSync(f,'www/'+f);});const srcDir='assets/horse';const dstDir='www/assets/horse';if(fs.existsSync(srcDir)){fs.mkdirSync(dstDir,{recursive:true});fs.readdirSync(srcDir).filter(f=>f.toLowerCase().endsWith('.png')).forEach(f=>fs.copyFileSync(srcDir+'/'+f,dstDir+'/'+f));}\""
   },
   "capacitor": {
     "includesSource": false

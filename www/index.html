@@ -9,16 +9,18 @@
     <title>경주마 스타트 Pro - 멀티플레이</title>
     <link rel="manifest" href="data:application/manifest+json,{'name':'경주마스타트','short_name':'경마게임','display':'standalone','orientation':'landscape','start_url':'/','background_color':'#1a1a1a','theme_color':'#1a1a1a'}">
     <link rel="stylesheet" href="style.css">
-    <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser-arcade-physics.min.js"></script>
-    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <!-- pixel-ish UI: RUN(영문) / 점프(한글) 모두 웹폰트로 지원 -->
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Noto+Sans+KR:wght@400;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser-arcade-physics.min.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js" crossorigin="anonymous"></script>
     <style>
         #game-container { width: 100%; height: 100%; }
     </style>
 </head>
 <body>
 <div id="game-container"></div>
-<!-- Title / Lobby DOM UI (Phaser 위에 표시) -->
-<div id="ui-overlay" class="hidden">
+<!-- Title / Lobby DOM UI (로딩 실패 시에도 화면 보이도록 기본 표시) -->
+<div id="ui-overlay" class="active">
     <div id="title-panel" class="title-panel">
         <h1>경주마 스타트 Pro</h1>
         <p class="sub">멀티플레이</p>
@@ -40,12 +42,95 @@
 </div>
 
 <script>
-// 앱에서 사용 시: Render 등 배포된 서버 URL 입력. 로컬 테스트 시 '' 로 두고 같은 네트워크에서 서버 접속.
-const SOCKET_URL = window.SOCKET_URL || '';
+// ---------- 소켓 서버(배포용) ----------
+// Netlify(정적 호스팅)에서는 소켓 서버가 별도(Render)에 있어야 합니다.
+// Render Web Service URL을 여기에 넣으세요.
+const SOCKET_URL = window.SOCKET_URL || 'https://horse-race-server.onrender.com';
 
-const TARGET_DISTANCE = 4000;
+const TARGET_DISTANCE = 8000;
 const COLOR_ORDER = ['red', 'blue', 'green', 'yellow'];
 const HORSE_COLORS_HEX = { red: 0xe53935, blue: 0x1e88e5, green: 0x43a047, yellow: 0xfdd835 };
+
+// ===== 타일셋(track_tile.png)에서 트랙 패턴 텍스처 생성 =====
+function buildTrackPatternTexture(scene) {
+    const sourceKey = 'track_tile_tex';
+    if (!scene.textures.exists(sourceKey)) return null;
+    const src = scene.textures.get(sourceKey).getSourceImage();
+    const tileSize = 64;
+    const cols = 7;
+    const rows = 7;
+    const totalTiles = 47; // 사용자 제공 스펙
+
+    const sampleCanvas = document.createElement('canvas');
+    sampleCanvas.width = src.width;
+    sampleCanvas.height = src.height;
+    const sctx = sampleCanvas.getContext('2d');
+    sctx.drawImage(src, 0, 0);
+
+    const tiles = [];
+    for (let i = 0; i < totalTiles; i++) {
+        const tx = (i % cols) * tileSize;
+        const ty = Math.floor(i / cols) * tileSize;
+        if (ty >= rows * tileSize) break;
+        const img = sctx.getImageData(tx, ty, tileSize, tileSize).data;
+        let rSum = 0, gSum = 0, bSum = 0, cnt = 0, bright = 0;
+        for (let p = 0; p < img.length; p += 4) {
+            const a = img[p + 3];
+            if (a < 10) continue;
+            const r = img[p], g = img[p + 1], b = img[p + 2];
+            rSum += r; gSum += g; bSum += b; cnt++;
+            if (r > 205 && g > 205 && b > 205) bright++;
+        }
+        if (!cnt) continue;
+        const rAvg = rSum / cnt;
+        const gAvg = gSum / cnt;
+        const bAvg = bSum / cnt;
+        const brightRatio = bright / cnt;
+        // grass: 녹색 우세 + 갈색/밝은 라인 비율이 낮은 타일 선호
+        const grassScore = (gAvg - rAvg) * 1.8 + (gAvg - bAvg) - brightRatio * 40;
+        // lane: 갈색(적/녹) 우세 + 파란색 낮음 + 흰 라인(밝기) 약간 포함, 녹색 우세는 강한 감점
+        const laneBrown = (rAvg * 0.9 + gAvg * 0.7) - bAvg * 1.2;
+        const greenPenalty = Math.max(0, gAvg - rAvg) * 2.0;
+        const laneScore = laneBrown + brightRatio * 120 - greenPenalty;
+        tiles.push({ i, tx, ty, grassScore, laneScore, rAvg, gAvg, bAvg, brightRatio });
+    }
+    if (!tiles.length) return null;
+
+    // 여러 타일을 섞으면 깨진 패턴이 보일 수 있어, 대표 타일 1개씩만 선택
+    const bestGrass = [...tiles].sort((a, b) => b.grassScore - a.grassScore)[0] || tiles[0];
+    // lane은 녹색 우세 타일을 제외하고 선택
+    const laneCandidates = tiles.filter(t => t.rAvg >= t.gAvg - 5);
+    const bestLane = [...(laneCandidates.length ? laneCandidates : tiles)]
+        .sort((a, b) => b.laneScore - a.laneScore)[0] || tiles[0];
+
+    const outCols = 10;
+    // 요청 구조:
+    // grass_top 2타일 + lane1 2타일 + lane2 2타일 + lane3 2타일 + lane4 2타일 + grass_bottom 2타일
+    // 총 12타일 높이
+    const outRows = 12;
+    const outCanvas = document.createElement('canvas');
+    outCanvas.width = outCols * tileSize;
+    outCanvas.height = outRows * tileSize;
+    const octx = outCanvas.getContext('2d');
+
+    for (let y = 0; y < outRows; y++) {
+        // y: 0~1 상단 잔디, 2~9 레인 4개(각 2타일), 10~11 하단 잔디
+        const useLane = y >= 2 && y <= 9;
+        for (let x = 0; x < outCols; x++) {
+            const t = useLane ? bestLane : bestGrass;
+            octx.drawImage(
+                src,
+                t.tx, t.ty, tileSize, tileSize,
+                x * tileSize, y * tileSize, tileSize, tileSize
+            );
+        }
+    }
+
+    const outKey = 'track_generated_tex';
+    if (scene.textures.exists(outKey)) scene.textures.remove(outKey);
+    scene.textures.addCanvas(outKey, outCanvas);
+    return outKey;
+}
 
 // ========== Preload Scene ==========
 class PreloadScene extends Phaser.Scene {
@@ -54,6 +139,68 @@ class PreloadScene extends Phaser.Scene {
         for (let i = 1; i <= 4; i++) {
             this.load.image(`horse_raw${i}`, `horse${i}.png`);
         }
+        // ===== 대기(아이들) 말 이미지: red/blue/green/yellow, frame 1~3 =====
+        this.load.image('idle_red_1', 'assets/horse/horse_jockey_red_idle_frame1-removebg-preview.png');
+        this.load.image('idle_red_2', 'assets/horse/horse_jockey_red_idle_frame2-removebg-preview.png');
+        this.load.image('idle_red_3', 'assets/horse/horse_jockey_red_idle_frame3-removebg-preview.png');
+
+        this.load.image('idle_blue_1', 'assets/horse/horse_jockey_blue_idle_frame1-removebg-preview.png');
+        this.load.image('idle_blue_2', 'assets/horse/horse_jockey_blue_idle_frame2-removebg-preview.png');
+        this.load.image('idle_blue_3', 'assets/horse/horse_jockey_blue_idle_frame3-removebg-preview.png');
+
+        this.load.image('idle_green_1', 'assets/horse/horse_jockey_green_idle_frame1-removebg-preview.png');
+        // frame2는 생성 후 좌우반전해서 idle_green_2 로 사용
+        this.load.image('idle_green_2_raw', 'assets/horse/horse_jockey_green_idle_frame2-removebg-preview.png');
+        this.load.image('idle_green_3', 'assets/horse/horse_jockey_green_idle_frame3-removebg-preview.png');
+
+        this.load.image('idle_yellow_1', 'assets/horse/horse_jockey_yellow_idle_frame1-removebg-preview.png');
+        this.load.image('idle_yellow_2', 'assets/horse/horse_jockey_yellow_idle_frame2-removebg-preview.png');
+        this.load.image('idle_yellow_3', 'assets/horse/horse_jockey_yellow_idle_frame3-removebg-preview.png');
+
+        // ===== 달리기(런) 말 이미지: red/blue/green/yellow, frame 1~4 =====
+        // red
+        this.load.image('run_red_1', 'assets/horse/horse_jockey_red_run_frame1-removebg-preview.png');
+        this.load.image('run_red_2', 'assets/horse/horse_jockey_red_run_frame2-removebg-preview.png');
+        this.load.image('run_red_3', 'assets/horse/horse_jockey_red_run_frame3-removebg-preview.png');
+        this.load.image('run_red_4', 'assets/horse/horse_jockey_red_run_frame4-removebg-preview.png');
+        // blue
+        this.load.image('run_blue_1', 'assets/horse/horse_jockey_blue_run_frame1-removebg-preview.png');
+        this.load.image('run_blue_2', 'assets/horse/horse_jockey_blue_run_frame2-removebg-preview.png');
+        this.load.image('run_blue_3', 'assets/horse/horse_jockey_blue_run_frame3-removebg-preview.png');
+        this.load.image('run_blue_4', 'assets/horse/horse_jockey_blue_run_frame4-removebg-preview.png');
+        // green
+        this.load.image('run_green_1', 'assets/horse/horse_jockey_green_run_frame1-removebg-preview.png');
+        this.load.image('run_green_2', 'assets/horse/horse_jockey_green_run_frame2-removebg-preview.png');
+        this.load.image('run_green_3', 'assets/horse/horse_jockey_green_run_frame3-removebg-preview.png');
+        this.load.image('run_green_4', 'assets/horse/horse_jockey_green_run_frame4-removebg-preview.png');
+        // yellow
+        this.load.image('run_yellow_1', 'assets/horse/horse_jockey_yellow_run_frame1-removebg-preview.png');
+        this.load.image('run_yellow_2', 'assets/horse/horse_jockey_yellow_run_frame2-removebg-preview.png');
+        this.load.image('run_yellow_3', 'assets/horse/horse_jockey_yellow_run_frame3-removebg-preview.png');
+        this.load.image('run_yellow_4', 'assets/horse/horse_jockey_yellow_run_frame4-removebg-preview.png');
+        // ===== 점프 / 실패: 팀별 5프레임 =====
+        COLOR_ORDER.forEach((c) => {
+            for (let n = 1; n <= 5; n++) {
+                this.load.image(
+                    `jump_${c}_${n}`,
+                    `assets/horse/horse_jockey_${c}_jump_frame${n}-removebg-preview.png`
+                );
+                this.load.image(
+                    `fail_${c}_${n}`,
+                    `assets/horse/horse_jockey_${c}_fail_frame${n}-removebg-preview.png`
+                );
+            }
+        });
+        // crowd.png: 현재 페이지와 같은 폴더 기준으로 로드 (로컬/배포 동일하게)
+        const crowdUrl = new URL('crowd.png?v=2', window.location.href).href;
+        this.load.image('crowd', crowdUrl);
+        // 장애물 스프라이트 (허들 + 물웅덩이) – 같은 폴더의 Obstacle.png
+        this.load.image('obstacle_raw', 'Obstacle.png');
+        // 점프/실패 전용 말 이미지 (horse2 계열, 4프레임 스프라이트 시트)
+        this.load.image('horse2_jump_raw', 'horse2_jump.png');
+        this.load.image('horse2_fail_raw', 'horse2_fail.png');
+        // 트랙 이미지 (Track.png) – 코드로 그리던 흙 트랙을 대체
+        this.load.image('track_tex', 'Track.png');
         this.load.once('loaderror', () => {});
     }
     create() {
@@ -76,13 +223,29 @@ class TitleScene extends Phaser.Scene {
         const btnStart = document.getElementById('btn-game-start');
         input.value = localStorage.getItem('horse_nickname') || '';
         btnStart.onclick = () => {
+            // 이미 서버 연결 시도 중이면 중복 클릭 무시
+            if (window.gameState && window.gameState.connecting) return;
+
             const nickname = (input.value || '').trim().slice(0, 20) || 'Player';
             localStorage.setItem('horse_nickname', nickname);
-            window.gameState = { nickname };
+            window.gameState = window.gameState || {};
+            window.gameState.nickname = nickname;
+            window.gameState.connecting = true;
+
+            // 중복 접속 방지: 버튼 비활성화 + 안내 문구
+            const originalText = btnStart.dataset.originalText || btnStart.textContent;
+            btnStart.dataset.originalText = originalText;
+            btnStart.disabled = true;
+            btnStart.textContent = '서버 연결 대기중...';
+
             const socket = io(SOCKET_URL || window.location.origin);
             socket.emit('set_nickname', nickname);
             socket.emit('create_or_join');
             socket.once('your_info', (data) => {
+                window.gameState.connecting = false;
+                btnStart.disabled = false;
+                btnStart.textContent = btnStart.dataset.originalText || '게임 시작';
+
                 window.gameState.socket = socket;
                 window.gameState.myColor = data.color;
                 window.gameState.myNickname = data.nickname;
@@ -90,9 +253,14 @@ class TitleScene extends Phaser.Scene {
                 window.gameState.players = data.players || [];
                 this.scene.start('Lobby', data);
             });
-            socket.once('error', (err) => {
-                alert(err.message || '접속 실패');
-            });
+            const onError = (err) => {
+                window.gameState.connecting = false;
+                btnStart.disabled = false;
+                btnStart.textContent = btnStart.dataset.originalText || '게임 시작';
+                alert((err && err.message) || '서버 연결에 실패했습니다.\n잠시 후 다시 시도해 주세요.');
+            };
+            socket.once('error', onError);
+            socket.once('connect_error', onError);
         };
     }
 }
@@ -125,11 +293,15 @@ class LobbyScene extends Phaser.Scene {
         socket.on('countdown', (sec) => {
             countEl.textContent = sec > 0 ? sec : '';
             msgEl.textContent = sec > 0 ? '다른 참여자 대기 중... ' + sec + '초 후 시작' : '곧 시작합니다!';
+            window.gameState.lastLobbyCountdown = sec;
         });
         socket.once('game_start', (payload) => {
             const overlay = document.getElementById('ui-overlay');
             overlay.classList.add('hidden');
             overlay.classList.remove('active');
+            payload.lobbyCountdownAtStart = (window.gameState && typeof window.gameState.lastLobbyCountdown === 'number')
+                ? window.gameState.lastLobbyCountdown
+                : 0;
             this.scene.start('Game', payload);
         });
 
@@ -147,6 +319,275 @@ class LobbyScene extends Phaser.Scene {
     }
 }
 
+// ========== Rhythm Button (image_9 기반) ==========
+class RhythmButton {
+    constructor(scene, x, y, opts) {
+        this.scene = scene;
+        this.x = x;
+        this.y = y;
+        this.w = opts.width;
+        this.h = opts.height;
+        this.mainColor = opts.mainColor;
+        this.label = opts.label;
+        this.onDown = opts.onDown || null;
+
+        this.radius = opts.radius ?? Math.round(Math.min(this.w, this.h) * 0.22);
+        this.depthPx = opts.depthPx ?? Math.max(3, Math.round(this.h * 0.08));
+        this.edgeDarkenFactor = opts.edgeDarkenFactor ?? 0.78;
+
+        this.pressScale = opts.pressScale ?? 0.95;
+        this.pressOffsetY = opts.pressOffsetY ?? Math.round(this.h * 0.05);
+        this.pressDarkenFactor = opts.pressDarkenFactor ?? 0.86;
+
+        this.fontFamily = opts.fontFamily ?? '"Press Start 2P","Noto Sans KR",monospace';
+        this.fontSize = opts.fontSize ?? Math.round(this.h * 0.42);
+
+        this.iconBodyColor = opts.iconBodyColor ?? 0x8d6e63; // brown
+        this.iconPantsColor = opts.iconPantsColor ?? 0xffffff; // white
+        this.iconScale = opts.iconScale ?? 0.40;
+        this.iconTextureKey = opts.iconTextureKey ?? null;
+        this.iconImage = null;
+
+        this.baseScale = 1;
+        this.baseX = x;
+        this.baseY = y;
+        this.isDown = false;
+        this.releaseTween = null;
+
+        this.container = scene.add.container(x, y);
+        // 카메라 스크롤에도 UI 버튼이 화면에 고정되도록 스크롤 팩터 0
+        this.container.setScrollFactor(0);
+        // 트랙 아래 반투명 패널(Depth 100) 위로 버튼이 렌더되도록 depth를 올림
+        this.container.setDepth(opts.uiDepth ?? 2000);
+        this.bgGfx = scene.add.graphics();
+        this.iconGfx = scene.add.graphics();
+        this.container.add([this.bgGfx, this.iconGfx]);
+
+        this.labelText = scene.add.text(0, 0, this.label, {
+            fontFamily: this.fontFamily,
+            fontSize: this.fontSize + 'px',
+            color: '#ffffff',
+            fontStyle: 'bold',
+            align: 'center',
+        }).setOrigin(0.5, 0.5).setScrollFactor(0);
+        this.container.add(this.labelText);
+
+        // Optional icon texture (e.g. user-made image_8.png)
+        if (this.iconTextureKey && scene.textures.exists(this.iconTextureKey)) {
+            const iconSize = Math.round(Math.min(this.w, this.h) * this.iconScale);
+            const iconLeft = -this.w / 2 + Math.round(this.h * 0.20);
+            const iconTop = -iconSize / 2;
+            this.iconImage = scene.add.image(iconLeft + iconSize / 2, iconTop + iconSize / 2, this.iconTextureKey);
+            this.iconImage.setDisplaySize(iconSize, iconSize);
+            this.iconImage.setScrollFactor(0);
+            this.container.add(this.iconImage);
+        }
+
+        // Input hit area (separate object so pointer events are reliable)
+        this.hitArea = scene.add.rectangle(x, y, this.w, this.h, 0x000000, 0)
+            .setOrigin(0.5, 0.5)
+            .setScrollFactor(0)
+            .setDepth(1000)
+            .setInteractive({ useHandCursor: true });
+
+        this.hitArea.on('pointerdown', (pointer, localX, localY, event) => {
+            if (event && event.stopPropagation) event.stopPropagation();
+            this.handleDown();
+        });
+        this.hitArea.on('pointerup', (pointer) => this.handleUp());
+        this.hitArea.on('pointerout', () => {
+            if (this.isDown) this.handleUp();
+        });
+
+        this.renderUp();
+    }
+
+    destroy() {
+        this.hitArea?.destroy();
+        this.iconImage?.destroy?.();
+        this.container?.destroy();
+        this.releaseTween?.stop?.();
+    }
+
+    handleDown() {
+        if (this.isDown) return;
+        this.isDown = true;
+        this.releaseTween?.stop?.();
+
+        this.container.setScale(this.pressScale);
+        this.container.setY(this.baseY + this.pressOffsetY);
+        this.hitArea.setScale(this.pressScale);
+        this.hitArea.setY(this.baseY + this.pressOffsetY);
+
+        this.renderDown();
+        if (this.onDown) this.onDown();
+    }
+
+    handleUp() {
+        if (!this.isDown) return;
+        this.isDown = false;
+
+        this.renderUp();
+
+        this.releaseTween?.stop?.();
+        this.releaseTween = this.scene.tweens.add({
+            targets: [this.container, this.hitArea],
+            scaleX: this.baseScale,
+            scaleY: this.baseScale,
+            y: this.baseY,
+            duration: 190,
+            ease: 'Elastic.Out'
+        });
+    }
+
+    renderUp() {
+        this.bgGfx.clear();
+        this.iconGfx.clear();
+
+        const w = this.w;
+        const h = this.h;
+        const r = this.radius;
+        const depth = this.depthPx;
+
+        const edgeColor = this.darken(this.mainColor, this.edgeDarkenFactor);
+
+        // Raised side/bottom edge
+        this.bgGfx.fillStyle(edgeColor, 1);
+        this.bgGfx.fillRoundedRect(
+            -w / 2 + depth,
+            -h / 2 + depth,
+            w,
+            h,
+            r
+        );
+
+        // Main button face
+        this.bgGfx.fillStyle(this.mainColor, 1);
+        this.bgGfx.fillRoundedRect(
+            -w / 2,
+            -h / 2,
+            w,
+            h,
+            r
+        );
+
+        // Small highlight
+        this.bgGfx.fillStyle(0xffffff, 0.22);
+        const hiH = Math.max(3, Math.round(h * 0.14));
+        this.bgGfx.fillRoundedRect(
+            -w / 2 + 2,
+            -h / 2 + 2,
+            Math.round(w * 0.48),
+            hiH,
+            Math.max(2, Math.round(r * 0.30))
+        );
+
+        this.drawHorseJockeyIcon();
+    }
+
+    renderDown() {
+        this.bgGfx.clear();
+        this.iconGfx.clear();
+
+        const w = this.w;
+        const h = this.h;
+        const r = this.radius;
+        const dark = this.darken(this.mainColor, this.pressDarkenFactor);
+
+        // Pressed: remove raised edge (only flat face)
+        this.bgGfx.fillStyle(dark, 1);
+        this.bgGfx.fillRoundedRect(
+            -w / 2,
+            -h / 2,
+            w,
+            h,
+            r
+        );
+
+        // Inner highlight
+        this.bgGfx.fillStyle(0xffffff, 0.10);
+        this.bgGfx.fillRoundedRect(
+            -w / 2 + 2,
+            -h / 2 + 2,
+            Math.round(w * 0.40),
+            Math.max(3, Math.round(h * 0.12)),
+            Math.max(2, Math.round(r * 0.30))
+        );
+
+        this.drawHorseJockeyIcon();
+    }
+
+    drawHorseJockeyIcon() {
+        if (this.iconImage) return;
+        // Requirement: very small simplified "brown horse + white pants jockey"
+        // (If you later load image_8.png, you can replace this draw method with drawImage.)
+        const w = this.w;
+        const h = this.h;
+
+        const iconSize = Math.round(Math.min(w, h) * this.iconScale);
+        const grid = 8;
+        const px = Math.max(1, Math.floor(iconSize / grid));
+
+        const iconLeft = -w / 2 + Math.round(h * 0.20);
+        const iconTop = -iconSize / 2;
+
+        const brown = this.iconBodyColor;
+        const pants = this.iconPantsColor;
+
+        const f = (gx, gy, color) => {
+            this.iconGfx.fillStyle(color, 1);
+            this.iconGfx.fillRect(iconLeft + gx * px, iconTop + gy * px, px, px);
+        };
+
+        // Horse (minimal silhouette)
+        for (let gy = 4; gy <= 6; gy++) {
+            f(2, gy, brown);
+            f(3, gy, brown);
+            f(4, gy, brown);
+            if (gy === 5) f(5, gy, brown);
+        }
+        // Head
+        f(1, 3, brown);
+        f(2, 3, brown);
+        f(1, 4, brown);
+        f(2, 4, brown);
+        // Tail
+        f(5, 4, brown);
+        f(6, 5, brown);
+
+        // Legs
+        f(2, 6, brown);
+        f(3, 6, brown);
+        f(5, 6, brown);
+
+        // Jockey
+        f(3, 1, brown);
+        f(2, 2, brown);
+        f(3, 2, brown);
+        f(4, 2, brown);
+
+        // Torso
+        f(3, 3, brown);
+        f(3, 4, brown);
+
+        // Pants (white)
+        f(3, 5, pants);
+        f(4, 5, pants);
+
+        // Arms/hand hint
+        f(2, 4, brown);
+        f(4, 4, brown);
+    }
+
+    darken(color, factor) {
+        const c = Phaser.Display.Color.IntegerToColor(color);
+        const r = Phaser.Math.Clamp(Math.round(c.red * factor), 0, 255);
+        const g = Phaser.Math.Clamp(Math.round(c.green * factor), 0, 255);
+        const b = Phaser.Math.Clamp(Math.round(c.blue * factor), 0, 255);
+        return Phaser.Display.Color.GetColor(r, g, b);
+    }
+}
+
 // ========== Game Scene ==========
 class GameScene extends Phaser.Scene {
     constructor() { super({ key: 'Game' }); }
@@ -154,44 +595,168 @@ class GameScene extends Phaser.Scene {
         this.players = (data && data.players) || window.gameState?.players || [];
         this.myColor = window.gameState?.myColor || 'red';
         this.socket = window.gameState?.socket;
+        // 서버에서 전달된 장애물 정의 (모든 유저 공통)
+        this.obstacleDefs = (data && data.obstacles) || [];
+        // 참가한 플레이어 색상 = 인간, 나머지 = 컴퓨터(AI) 자동 출발
         this.playerColors = new Set((this.players || []).map(p => p.color));
+        // 점프 판정 구간 (px) – 장애물 앞에서만 점프 허용
+        // 성공 범위를 조금 더 넓게 조정
+        this.jumpMaxRange = 380;    // 이 거리 안에 들어오면 점프 시도 가능
+        this.jumpSuccessFar = 300;  // 성공 상한
+        this.jumpSuccessNear = 120; // 성공 하한
+        // 플레이어 입력 기반 스피드 HUD
+        this.speed = 0;
+        this.lastTapTime = 0;
+        // 순위 / 점수 HUD
+        this.myRank = null;
+
+        // 게임 씬 시작과 동시에 5초 카운트다운 후에 달리기 시작
+        this.preStartSeconds = 5;
+        this.preStart = true;
     }
     create() {
         const scene = this;
         const { width, height } = scene.scale;
         const scaleY = height / 960;
         const laneHeight = Math.round(100 * scaleY);
-        const startY = Math.round(150 * scaleY);
+        // 대기(idle) / 달리기(run) / 점프·실패 애니 — 프레임 속도 통일
+        const HORSE_IDLE_FPS = 3;
+        const HORSE_RUN_FPS = 9;
 
-        for (let i = 1; i <= 4; i++) {
-            if (!scene.textures.exists(`horse_raw${i}`)) continue;
-            const img = scene.textures.get(`horse_raw${i}`).getSourceImage();
+        // 말 텍스처/애니
+        // 모든 말 이미지를 horse2 기반으로 사용하기 위해 horse2만 시트/애니를 만든다.
+        if (scene.textures.exists('horse_raw2')) {
+            const img = scene.textures.get('horse_raw2').getSourceImage();
             const w = img.width, h = img.height;
-            if (w < 50 || h < 50) continue;
-            const fW = w >= 3 && h >= 3 ? Math.floor(w / 3) : w;
-            const fH = w >= 3 && h >= 3 ? Math.floor(h / 3) : h;
-            const frameCount = (w >= 3 && h >= 3) ? 9 : 1;
-            scene.textures.addSpriteSheet(`horse_sheet${i}`, img, { frameWidth: fW, frameHeight: fH });
-            if (frameCount > 1) {
-                scene.anims.create({
-                    key: `run${i}`,
-                    frames: scene.anims.generateFrameNumbers(`horse_sheet${i}`, { start: 0, end: frameCount - 1 }),
-                    frameRate: 15, repeat: -1
-                });
+            if (w >= 50 && h >= 50) {
+                const fW = w >= 3 && h >= 3 ? Math.floor(w / 3) : w;
+                const fH = w >= 3 && h >= 3 ? Math.floor(h / 3) : h;
+                const frameCount = (w >= 3 && h >= 3) ? 9 : 1;
+                scene.textures.addSpriteSheet('horse_sheet2', img, { frameWidth: fW, frameHeight: fH });
+                if (frameCount > 1 && !scene.anims.exists('run2')) {
+                    scene.anims.create({
+                        key: 'run2',
+                        frames: scene.anims.generateFrameNumbers('horse_sheet2', { start: 0, end: frameCount - 1 }),
+                        frameRate: 15,
+                        repeat: -1
+                    });
+                }
             }
         }
 
-        const trackTop = Math.round(110 * scaleY);
-        const trackH = Math.round(450 * scaleY);
+        // ===== 달리기(런) 애니메이션(4프레임) =====
+        // idle은 별도 스프라이트를 써서 표시하고, run은 기존 말 스프라이트(this.horses[i])에서 재생합니다.
+        COLOR_ORDER.forEach((color) => {
+            const animKey = `run_${color}`;
+            if (scene.anims.exists(animKey)) return;
+            const frames = [
+                { key: `run_${color}_1` },
+                { key: `run_${color}_2` },
+                { key: `run_${color}_3` },
+                { key: `run_${color}_4` },
+            ];
+            scene.anims.create({
+                key: animKey,
+                frames,
+                frameRate: HORSE_RUN_FPS,
+                repeat: -1
+            });
+        });
+
+        // 점프(5프레임, 1회) / 실패(5프레임, 1회) — 팀 색별 (FPS = 달리기 run 과 동일)
+        COLOR_ORDER.forEach((color) => {
+            const j1 = `jump_${color}_1`;
+            if (scene.textures.exists(j1)) {
+                const jKey = `jump_${color}`;
+                if (!scene.anims.exists(jKey)) {
+                    scene.anims.create({
+                        key: jKey,
+                        frames: [1, 2, 3, 4, 5].map((i) => ({ key: `jump_${color}_${i}` })),
+                        frameRate: HORSE_RUN_FPS,
+                        repeat: 0
+                    });
+                }
+            }
+            const f1 = `fail_${color}_1`;
+            if (scene.textures.exists(f1)) {
+                const fKey = `fail_${color}`;
+                if (!scene.anims.exists(fKey)) {
+                    scene.anims.create({
+                        key: fKey,
+                        frames: [1, 2, 3, 4, 5].map((i) => ({ key: `fail_${color}_${i}` })),
+                        frameRate: HORSE_RUN_FPS,
+                        repeat: 0
+                    });
+                }
+            }
+        });
+
         const fenceH = Math.round(10 * scaleY);
-        const standH = Math.round(100 * scaleY);
+        const standH = Math.round(220 * scaleY);  // 관중 세로 크게
+        const topSectionH = standH + fenceH;      // 이미지가 흰선까지 덮음
+        const trackTop = topSectionH;
+        // 트랙 배경이 아래로 조금 더 보이도록 높이 살짝 증가
+        const trackExtraH = Math.round(80 * scaleY);
+        const trackH = Math.round(450 * scaleY) + trackExtraH;
         const stripeH = Math.round(45 * scaleY);
-        scene.add.rectangle(width / 2, standH / 2, width, standH, 0x222222).setScrollFactor(0).setDepth(-15);
-        scene.add.rectangle(0, standH, 10000, fenceH, 0xffffff).setOrigin(0).setDepth(-12);
-        scene.add.rectangle(0, trackTop, 10000, trackH, 0x8d6e63).setOrigin(0).setDepth(-10);
+        const startY = trackTop + Math.round(40 * scaleY);
+        // 말·장애물 등을 화면에서 조금 더 아래로 내려 배치하기 위한 추가 오프셋
+        const entityOffsetY = Math.round(40 * scaleY);
+        // 배경 → 관중 이미지 → 그 위에 고정 펜스(흔들리지 않음)
+        scene.add.rectangle(width / 2, topSectionH / 2, width, topSectionH, 0x222222).setScrollFactor(0).setDepth(-15);
+        this.crowdSprite = null;
+        this.crowdFrame = 0;
+        this.crowdTick = 0;
+        const tryAddCrowd = () => {
+            if (!scene.textures.exists('crowd')) return false;
+            try {
+                const img = scene.textures.get('crowd').getSourceImage();
+                const cw = img.naturalWidth || img.width || 0;
+                const ch = img.naturalHeight || img.height || 0;
+                if (cw < 10 || ch < 20) return false;
+                // 세로를 2등분해서 2프레임으로 사용 (300+300이 아니어도 동작)
+                const frameH = Math.floor(ch / 2);
+                if (!scene.textures.exists('crowd_sheet')) {
+                    try {
+                        scene.textures.addSpriteSheet('crowd_sheet', img, { frameWidth: cw, frameHeight: frameH });
+                    } catch (e) { return false; }
+                }
+                // 관중 이미지를 살짝 아래로 내려서 배치 (기존보다 약간 아래)
+                const crowdSprite = scene.add.sprite(scene.scale.width / 2, topSectionH / 2 + Math.round(20 * scaleY), 'crowd_sheet', 0);
+                crowdSprite.setDisplaySize(scene.scale.width, topSectionH).setScrollFactor(0).setDepth(-12);
+                this.crowdSprite = crowdSprite;
+                this.crowdTick = 0;
+                return true;
+            } catch (e) { }
+            return false;
+        };
+        if (!tryAddCrowd()) {
+            const crowdUrl = new URL('crowd.png?v=4', window.location.href).href;
+            scene.load.image('crowd', crowdUrl);
+            scene.load.once('filecomplete', (key) => { if (key === 'crowd') tryAddCrowd(); });
+            scene.load.start();
+        }
+        // 관중 이미지 위에 고정 펜스(카메라 따라가게 해서 항상 보이게)
+        this.fenceRect = scene.add.rectangle(scene.scale.width / 2, standH + fenceH / 2, width + 100, fenceH, 0xffffff).setOrigin(0.5).setScrollFactor(0).setDepth(-11);
+
+        // ===== 트랙 영역: 이전 방식(단일 Track.png 타일 스크롤)로 복원 =====
+        if (scene.textures.exists('track_tex')) {
+            const trackTile = scene.add.tileSprite(
+                0,
+                trackTop,
+                TARGET_DISTANCE + width,
+                trackH,
+                'track_tex'
+            );
+            trackTile.setOrigin(0).setDepth(-10);
+            trackTile.setTileScale(1, 2.1);
+            this.trackTile = trackTile;
+        } else {
+            // 이미지 로드 실패 대비 폴백
+            scene.add.rectangle(0, trackTop, 10000, trackH, 0x8d6e63).setOrigin(0).setDepth(-10);
+        }
         for (let i = 0; i < 4; i++) {
             const y = startY + i * laneHeight;
-            scene.add.rectangle(0, y + laneHeight, 10000, 2, 0xffffff, 0.3).setOrigin(0).setDepth(-5);
             scene.add.rectangle(150, y + Math.round(50 * scaleY), 15, Math.round(80 * scaleY), 0xbdc3c7).setDepth(5);
         }
         const finishLineX = TARGET_DISTANCE;
@@ -200,64 +765,511 @@ class GameScene extends Phaser.Scene {
             scene.add.rectangle(finishLineX + 40, trackTop + i * stripeH, 40, stripeH, (i % 2 === 0) ? 0x000000 : 0xffffff).setOrigin(0).setDepth(-2);
         }
 
+        // ===== 출발 전 5초 카운트다운 + 대기(아이들) 말 이미지 =====
+        // idle 말은 run 말보다 왼쪽으로 이동해서 '대기선(스타트선)' 앞에 서 있는 것처럼 보이게 함
+        this.waitingShiftX = Math.round(30 * scaleY);
+
+        // 초록 팀 frame2만 좌우반전해서 idle_green_2 로 사용
+        if (scene.textures.exists('idle_green_2_raw') && !scene.textures.exists('idle_green_2')) {
+            const img = scene.textures.get('idle_green_2_raw').getSourceImage();
+            const canvas = document.createElement('canvas');
+            canvas.width = img.width;
+            canvas.height = img.height;
+            const ctx = canvas.getContext('2d');
+            ctx.translate(canvas.width, 0);
+            ctx.scale(-1, 1);
+            ctx.drawImage(img, 0, 0);
+            scene.textures.addCanvas('idle_green_2', canvas);
+        }
+
+        COLOR_ORDER.forEach((color) => {
+            const animKey = `idle_${color}`;
+            if (scene.anims.exists(animKey)) return;
+
+            const frames = [
+                { key: `idle_${color}_1` },
+                { key: color === 'green' ? 'idle_green_2' : `idle_${color}_2` },
+                { key: `idle_${color}_3` },
+            ];
+            scene.anims.create({
+                key: animKey,
+                frames,
+                frameRate: HORSE_IDLE_FPS,
+                repeat: -1
+            });
+        });
+
+        if (this.preStartSeconds > 0) {
+            const countdownText = scene.add.text(
+                width / 2,
+                trackTop + Math.round(trackH * 0.20),
+                `${this.preStartSeconds}초`,
+                {
+                    fontSize: Math.round(Math.min(width, height) * 0.10) + 'px',
+                    fill: '#ffeb3b',
+                    fontStyle: 'bold',
+                    stroke: '#000000',
+                    strokeThickness: 6,
+                    align: 'center'
+                }
+            ).setOrigin(0.5).setDepth(3000);
+
+            let sec = this.preStartSeconds;
+            scene.time.addEvent({
+                delay: 1000,
+                repeat: this.preStartSeconds - 1,
+                callback: () => {
+                    sec--;
+                    if (sec > 0) countdownText.setText(`${sec}초`);
+                }
+            });
+
+            scene.time.delayedCall(this.preStartSeconds * 1000, () => {
+                this.preStart = false;
+                countdownText.setVisible(false);
+            });
+        }
+
         const horseSize = Math.round(50 * scaleY);
-        const horseW = Math.round(80 * scaleY);
-        const horseH = Math.round(60 * scaleY);
+        // 대기(idle) / 달리기(run) 말: 동일한 화면 크기(표시 높이 기준 + idle 비율로 너비)
+        const horseWFallback = Math.round(48 * scaleY);
+        const horseHFallback = Math.round(36 * scaleY);
+        // update()에서도 사용할 수 있도록 인스턴스에 저장
+        this.horseSize = horseSize;
         this.horsePrevX = [];
+        this.playerIdleDisplayW = null;
+        this.playerIdleDisplayH = null;
+        this.playerRunDisplayW = null;
+        this.playerRunDisplayH = null;
+        // 말 4마리 (색상 순, 모두 horse2 시트 기반으로 동일 이미지 사용, 색상만 데이터로 구분)
         this.horses = [];
+        this.horsesIdle = [];
         const horseColors = [0xe53935, 0x1e88e5, 0x43a047, 0xfdd835];
         for (let idx = 0; idx < 4; idx++) {
-            const y = startY + idx * laneHeight + horseSize;
+            // 2~4레인 기본 보정(2번째~4번째 말 살짝 위)
+            // 3/4번째 말은 추가로 약간 더 위로(요청 반영)
+            const extraUpFor3And4 = Math.round(6 * scaleY);
+            const laneUpOffsetBase = (idx === 3)
+                ? Math.round(18 * scaleY)
+                : (idx >= 1 ? Math.round(10 * scaleY) : 0);
+            const laneUpOffset = (idx >= 2) ? (laneUpOffsetBase + extraUpFor3And4) : laneUpOffsetBase;
+            const y = startY + idx * laneHeight + horseSize + entityOffsetY - laneUpOffset;
             const colorKey = COLOR_ORDER[idx];
-            let h;
-            if (scene.textures.exists(`horse_sheet${idx + 1}`)) {
-                h = scene.physics.add.sprite(250, y, `horse_sheet${idx + 1}`, 0);
-                h.setScale(0.9 * scaleY);
+            const idleFrame1Key = `idle_${colorKey}_1`;
+            let targetH = Math.round(horseSize * 1.35);
+            let targetW = horseWFallback;
+            if (scene.textures.exists(idleFrame1Key)) {
+                const img = scene.textures.get(idleFrame1Key).getSourceImage();
+                const iw = img.naturalWidth || img.width || 1;
+                const ih = img.naturalHeight || img.height || 1;
+                targetW = Math.max(1, Math.round(targetH * (iw / ih)));
             } else {
-                h = scene.add.rectangle(250, y, horseW, horseH, horseColors[idx]);
+                targetH = horseHFallback;
+                targetW = horseWFallback;
+            }
+
+            // 말 이미지 표시 배율: 우리 약속 기준 100 → 150 이면 1.5배 (idle·run 비율 유지)
+            const horseDisplayScale = 1.5;
+            targetW = Math.max(1, Math.round(targetW * horseDisplayScale));
+            targetH = Math.max(1, Math.round(targetH * horseDisplayScale));
+
+            // 달리기(run) 말만: 기준(idle) 크기에서 2/3 줄임 → 표시 크기 = 기준의 1/3
+            const runDisplayW = Math.max(1, Math.round(targetW / 3));
+            const runDisplayH = Math.max(1, Math.round(targetH / 3));
+
+            let h;
+            if (scene.textures.exists('horse_sheet2')) {
+                h = scene.physics.add.sprite(250, y, 'horse_sheet2', 0);
+                h.setScale(1);
+                h.setDisplaySize(runDisplayW, runDisplayH);
+            } else {
+                h = scene.add.rectangle(250, y, runDisplayW, runDisplayH, horseColors[idx]);
                 scene.physics.add.existing(h, true);
             }
-            h.setDepth(10).setData({ color: colorKey, finished: false });
+            // lane 정보를 데이터로 저장해 두면 장애물 판정 등에 활용 가능
+            // lastMoveTime: 마지막으로 x가 변한 시간(정지/달리기 판정용)
+            // handledObstacleX: 마지막으로 처리한 장애물 X (AI 점프/실패 중복 방지용)
+            h.setDepth(10).setData({
+                color: colorKey,
+                finished: false,
+                lane: idx,
+                lastMoveTime: 0,
+                handledObstacleX: -9999,
+                aiSlowUntil: 0
+            });
             this.horses.push(h);
-            this.horsePrevX[idx] = 250;
-            if (scene.anims.exists(`run${idx + 1}`)) h.play(`run${idx + 1}`);
+            this.horsePrevX[idx] = h.x;
+            // 대기(아이들) 말 스프라이트: run 말은 숨기고 idle 표시 (idle=기준 크기, run=1/3)
+            const initialShiftX = this.preStart ? this.waitingShiftX : 0;
+            const idleSprite = scene.add.sprite(h.x - initialShiftX, h.y, idleFrame1Key)
+                .setDepth(h.depth - 1);
+            idleSprite.setDisplaySize(targetW, targetH);
+            idleSprite.setVisible(true);
+            const idleAnimKey = `idle_${colorKey}`;
+            if (scene.anims.exists(idleAnimKey)) idleSprite.play(idleAnimKey);
+
+            if (colorKey === this.myColor) {
+                this.playerIdleDisplayW = targetW;
+                this.playerIdleDisplayH = targetH;
+                this.playerRunDisplayW = runDisplayW;
+                this.playerRunDisplayH = runDisplayH;
+            }
+
+            this.horsesIdle[idx] = idleSprite;
+
+            if (h.anims) h.anims.stop();
+            h.setVisible(false);
+        }
+
+        // ===== 스타트선(대기선) =====
+        // idle 말은 run 말보다 왼쪽으로 이동하므로, 스타트선은 "run 말의 앞쪽"에 고정해서 그린다.
+        const refHorse = this.horses[0];
+        if (refHorse && typeof refHorse.displayWidth === 'number') {
+            const startLineX = refHorse.x + refHorse.displayWidth / 2;
+            const startLineThickness = Math.max(4, Math.round(6 * scaleY));
+            scene.add.rectangle(startLineX, trackTop + trackH / 2, startLineThickness, trackH, 0xffffff)
+                .setOrigin(0.5)
+                .setDepth(3)
+                .setAlpha(0.9);
         }
 
         this.player = this.horses[COLOR_ORDER.indexOf(this.myColor)];
         this.rivals = this.horses.filter((_, i) => COLOR_ORDER[i] !== this.myColor);
 
-        const bubbleFontSize = Math.max(14, Math.round(18 * scaleY));
+        // 플레이어 전용 점프/실패: 팀 색 5프레임 PNG 우선, 없으면 horse2 시트(4프레임) 폴백
+        this.playerJumpSprite = null;
+        this.playerFailSprite = null;
+        this.playerJumpAnimKey = null;
+        this.playerFailAnimKey = null;
+        this.isJumping = false;
+        this.isJumpingSuccess = false;
+        this.isFailing = false;
+        this.jumpStartX = 0;
+        this.jumpTargetX = 0;
+        this.jumpBaseY = 0;
+        this.jumpElapsed = 0;
+        // 점프 전체 시간을 조금 더 길게 해서 천천히 넘는 느낌
+        this.jumpDuration = 700; // ms
+        const pc = this.myColor;
+        const jumpTex1 = `jump_${pc}_1`;
+        const failTex1 = `fail_${pc}_1`;
+        if (this.player) {
+            const pw = this.player.displayWidth || Math.round(64 * scaleY);
+            const ph = this.player.displayHeight || Math.round(48 * scaleY);
+            // 점프·실패: 대기(idle) 말과 동일 표시 크기 (달리기 run 은 idle의 1/3이라 수치는 다름)
+            const jumpFailW = this.playerIdleDisplayW || pw;
+            const jumpFailH = this.playerIdleDisplayH || ph;
+            if (scene.textures.exists(jumpTex1) && scene.anims.exists(`jump_${pc}`)) {
+                this.playerJumpAnimKey = `jump_${pc}`;
+                this.playerJumpSprite = scene.add.sprite(this.player.x, this.player.y, jumpTex1)
+                    .setDepth(this.player.depth + 1)
+                    .setVisible(false)
+                    .setDisplaySize(jumpFailW, jumpFailH);
+            } else if (scene.textures.exists('horse2_jump_raw')) {
+                const jumpImg = scene.textures.get('horse2_jump_raw').getSourceImage();
+                const jw = jumpImg.width;
+                const jh = jumpImg.height;
+                const frameW = Math.max(1, Math.floor(jw / 4));
+                const frameH = jh;
+                const jumpSheetKey = 'horse2_jump_sheet';
+                if (!scene.textures.exists(jumpSheetKey)) {
+                    scene.textures.addSpriteSheet(jumpSheetKey, jumpImg, { frameWidth: frameW, frameHeight: frameH });
+                }
+                if (!scene.anims.exists('horse2_jump_anim')) {
+                    scene.anims.create({
+                        key: 'horse2_jump_anim',
+                        frames: scene.anims.generateFrameNumbers(jumpSheetKey, { start: 0, end: 3 }),
+                        frameRate: HORSE_RUN_FPS,
+                        repeat: 0
+                    });
+                }
+                this.playerJumpAnimKey = 'horse2_jump_anim';
+                this.playerJumpSprite = scene.add.sprite(this.player.x, this.player.y, jumpSheetKey, 0)
+                    .setDepth(this.player.depth + 1)
+                    .setVisible(false)
+                    .setDisplaySize(jumpFailW, jumpFailH);
+            }
+            if (scene.textures.exists(failTex1) && scene.anims.exists(`fail_${pc}`)) {
+                this.playerFailAnimKey = `fail_${pc}`;
+                this.playerFailSprite = scene.add.sprite(this.player.x, this.player.y, failTex1)
+                    .setDepth(this.player.depth + 2)
+                    .setVisible(false)
+                    .setDisplaySize(jumpFailW, jumpFailH);
+            } else if (scene.textures.exists('horse2_fail_raw')) {
+                const failImg = scene.textures.get('horse2_fail_raw').getSourceImage();
+                const fw = failImg.width;
+                const fh = failImg.height;
+                const fFrameW = Math.max(1, Math.floor(fw / 4));
+                const fFrameH = fh;
+                const failSheetKey = 'horse2_fail_sheet';
+                if (!scene.textures.exists(failSheetKey)) {
+                    scene.textures.addSpriteSheet(failSheetKey, failImg, { frameWidth: fFrameW, frameHeight: fFrameH });
+                }
+                if (!scene.anims.exists('horse2_fail_anim')) {
+                    scene.anims.create({
+                        key: 'horse2_fail_anim',
+                        frames: scene.anims.generateFrameNumbers(failSheetKey, { start: 0, end: 3 }),
+                        frameRate: HORSE_RUN_FPS,
+                        repeat: 0
+                    });
+                }
+                this.playerFailAnimKey = 'horse2_fail_anim';
+                this.playerFailSprite = scene.add.sprite(this.player.x, this.player.y, failSheetKey, 0)
+                    .setDepth(this.player.depth + 2)
+                    .setVisible(false)
+                    .setDisplaySize(jumpFailW, jumpFailH);
+            }
+        }
+
+        // ===== 장애물(Obstacle.png 기반 허들/물웅덩이) 배치 =====
+        // 서버에서 받은 obstacleDefs 를 기준으로, 모든 레인에 동일한 위치/타입으로 배치
+        this.obstacles = [];
+        if (this.obstacleDefs && this.obstacleDefs.length && scene.textures.exists('obstacle_raw')) {
+            const img = scene.textures.get('obstacle_raw').getSourceImage();
+            const sheetKey = 'obstacle_sheet';
+            const frameW = Math.max(1, Math.floor(img.width / 2));
+            const frameH = img.height;
+            if (!scene.textures.exists(sheetKey)) {
+                scene.textures.addSpriteSheet(sheetKey, img, { frameWidth: frameW, frameHeight: frameH });
+            }
+            this.obstacleDefs.forEach((def) => {
+                const frameIndex = def.type === 'water' ? 1 : 0;
+                for (let lane = 0; lane < 4; lane++) {
+                    // 말과 동일하게 2~4레인 보정 + 3/4번째 말은 추가로 더 위
+                    const extraUpFor3And4 = Math.round(6 * scaleY);
+                    const laneUpOffsetBase = (lane === 3)
+                        ? Math.round(18 * scaleY)
+                        : (lane >= 1 ? Math.round(10 * scaleY) : 0);
+                    const laneUpOffset = (lane >= 2) ? (laneUpOffsetBase + extraUpFor3And4) : laneUpOffsetBase;
+                    const laneCenterY = startY + lane * laneHeight + horseSize * 0.7 + entityOffsetY - laneUpOffset;
+                    // 허들은 이미지 크기를 조금 더 크게 하면서 Y는 조금 더 아래로
+                    const hurdleDownExtra = Math.round(18 * scaleY);
+                    // 물웅덩이도 약간 아래로
+                    const waterDownExtra = Math.round(6 * scaleY);
+                    // 물웅덩이: 현재 위치 기준, 살짝만 아래
+                    // 허들: 트랙 쪽으로 더 많이, 그리고 추가로 조금 더 아래로 내려 배치
+                    const baseY = (def.type === 'water')
+                        ? laneCenterY + horseSize * 0.40 + waterDownExtra
+                        : laneCenterY + horseSize * 0.30 + hurdleDownExtra;
+                    const sprite = scene.add.sprite(def.x, baseY, sheetKey, frameIndex);
+                    // 허들은 180도 뒤집어서(좌우 반전 느낌) 연출
+                    if (def.type === 'hurdle') {
+                        sprite.flipX = true;
+                    }
+                    // 허들과 물웅덩이 모두 원래의 2/3 크기로 축소
+                    const scaleFactor = def.type === 'water' ? (1.0 * 2 / 3) : (1.25 * 2 / 3);
+                    sprite.setDepth(6).setScale(scaleY * scaleFactor);
+                    scene.physics.add.existing(sprite, true);
+                    const body = sprite.body;
+                    if (body && body.setSize) {
+                        body.setSize(sprite.displayWidth * 0.8, sprite.displayHeight * 0.8, true);
+                    }
+                    const zoneH = Math.round(laneHeight * 0.42);
+                    const zoneY = laneCenterY + laneHeight * 0.1
+                        + (def.type === 'hurdle' ? hurdleDownExtra : 0)
+                        + (def.type === 'water' ? waterDownExtra : 0);
+                    const maxRange = this.jumpMaxRange || 380;
+                    const successFar = this.jumpSuccessFar || 300;
+                    const successNear = this.jumpSuccessNear || 120;
+                    const ox = def.x;
+                    const orangeW = maxRange;
+                    const orangeCx = ox - maxRange / 2;
+                    const perfectW = Math.max(10, successFar - successNear);
+                    const perfectCx = ox - (successFar + successNear) / 2;
+                    // 접근 시: 점프 가능 구간(주황 점멸) / 퍼펙트 구간(빨강 펄스)
+                    const zoneOrange = scene.add.rectangle(orangeCx, zoneY, orangeW, zoneH, 0xff9800, 0.35)
+                        .setStrokeStyle(2, 0xffcc80, 0.6)
+                        .setDepth(5)
+                        .setVisible(false);
+                    const zonePerfect = scene.add.rectangle(perfectCx, zoneY, perfectW, zoneH, 0xd50000, 0.55)
+                        .setStrokeStyle(4, 0xff5252, 0.95)
+                        .setDepth(6)
+                        .setVisible(false);
+
+                    this.obstacles.push({ sprite, type: def.type, lane, zoneOrange, zonePerfect });
+                }
+            });
+        }
+
+        // 말 이름 표시: 말풍선 대신 투명 배경에 글자만, 말 후미 쪽에 배치
+        const nameFontSize = Math.max(16, Math.round(22 * scaleY));
         let comNum = 0;
-        this.nameBubbles = [];
-        const bubbleOffsetX = Math.round(160 * scaleY);
+        this.nameLabels = [];
+        const nameOffsetX = Math.round(-80 * scaleY);  // 말 뒤쪽
+        const nameOffsetY = Math.round(-40 * scaleY);  // 말보다 약간 위
         COLOR_ORDER.forEach((color, idx) => {
             const p = (this.players || []).find((x) => x.color === color);
             const name = p ? p.nickname : 'com' + (++comNum);
             const horse = this.horses[idx];
-            const bubbleW = Math.round(120 * scaleY);
-            const bubbleH = Math.round(44 * scaleY);
-            const bubble = scene.add.container(horse.x + bubbleOffsetX, horse.y);
-            const bg = scene.add.rectangle(0, 0, bubbleW, bubbleH, 0x2d2d2d, 0.95).setStrokeStyle(2, 0xffffff, 0.8);
-            const label = scene.add.text(0, 0, name + '\n4000m', { fontSize: bubbleFontSize + 'px', fill: '#fff', fontStyle: 'bold', align: 'center' }).setOrigin(0.5);
-            bubble.add([bg, label]);
-            bubble.setDepth(25);
-            this.nameBubbles.push({ container: bubble, text: label, name: name });
+            const isMine = color === this.myColor;
+            const displayName = isMine ? ('★ ' + name) : name;
+            const label = scene.add.text(
+                horse.x + nameOffsetX,
+                horse.y + nameOffsetY,
+                displayName,
+                {
+                    fontSize: nameFontSize + 'px',
+                    fill: '#ffffff',
+                    fontStyle: 'bold',
+                    stroke: '#000000',
+                    strokeThickness: 4
+                }
+            ).setOrigin(0.5, 0.5).setDepth(25);
+            this.nameLabels.push({ label, name: displayName });
         });
 
+        // 상단 SPEED/RANK 보드판은 요청에 따라 제거
+
+        // 트랙 밑 패널 — 달리기는 화면 아무 곳이나 터치/클릭
         const trackBottom = trackTop + trackH;
         const gapBelowTrack = Math.round(20 * scaleY);
-        const btnRadius = Math.round(130 * scaleY);
-        const btnY = trackBottom + gapBelowTrack + btnRadius;
         const barTop = trackBottom;
         scene.add.rectangle(width / 2, (barTop + height) / 2, width, height - barTop, 0x1a1a1a, 0.9).setScrollFactor(0).setDepth(100);
-        const touchBtn = scene.add.circle(width / 2, btnY, btnRadius, 0xff5722).setInteractive({ useHandCursor: true }).setScrollFactor(0).setDepth(101);
-        const touchFontSize = Math.round(btnRadius * 0.62);
-        scene.add.text(width / 2, btnY, '터치', { fontSize: touchFontSize + 'px', fontStyle: 'bold', fill: '#fff' }).setOrigin(0.5).setScrollFactor(0).setDepth(102);
-        touchBtn.on('pointerdown', () => {
+
+        const tryTapRun = () => {
+            if (!this.player) return;
+            if (this.preStart) return;
             if (this.player.getData('finished')) return;
+            if (this.isFailing || this.isJumping) return;
+            const prevX = this.player.x;
             this.player.x = Math.min(this.player.x + 60, TARGET_DISTANCE);
+            if (this.player.x !== prevX) {
+                const now = this.time.now || 0;
+                const interval = now - (this.lastTapTime || now);
+                this.lastTapTime = now;
+                const tapsPerSec = interval > 0 ? 1000 / interval : 0;
+                this.speed = Phaser.Math.Linear(this.speed, tapsPerSec, 0.3);
+                this.player.setData('lastMoveTime', now);
+                this.player.setVisible(true);
+                const myIdx = COLOR_ORDER.indexOf(this.myColor);
+                if (this.horsesIdle && this.horsesIdle[myIdx]) {
+                    this.horsesIdle[myIdx].setVisible(false);
+                    if (this.horsesIdle[myIdx].anims) this.horsesIdle[myIdx].anims.stop();
+                }
+                const runKey = `run_${this.myColor}`;
+                if (scene.anims.exists(runKey) && this.player.anims && !this.player.anims.isPlaying) {
+                    this.player.play(runKey);
+                }
+            }
             if (this.socket) this.socket.emit('horse_move', { x: this.player.x });
+        };
+
+        // image_9 기반 RUN/점프 버튼 (기존 점프 버튼 자리에서 2개 나란히)
+        const btnH = Math.round(70 * scaleY);
+        const btnGap = Math.round(14 * scaleY);
+        let btnEachW = Math.round(260 * scaleY);
+        const maxPairW = Math.max(200, width - 24);
+        if (btnEachW * 2 + btnGap > maxPairW) {
+            btnEachW = Math.floor((maxPairW - btnGap) / 2);
+        }
+        const pairW = btnEachW * 2 + btnGap;
+        const pairLeftX = Math.round(width / 2 - pairW / 2);
+        const runBtnX = pairLeftX + Math.round(btnEachW / 2);
+        const jumpBtnX = pairLeftX + btnEachW + btnGap + Math.round(btnEachW / 2);
+        const jumpBtnY = trackBottom + gapBelowTrack + Math.round(48 * scaleY) + btnH / 2;
+
+        const doJump = () => {
+            if (!this.player || this.player.getData('finished')) return;
+            if (this.preStart) return;
+            if (this.isFailing) return;
+            if (!this.playerJumpSprite) return;
+            if (this.isJumping) return;
+
+            // ===== 내 레인에서 앞쪽 가장 가까운 장애물 기준 거리 판정 =====
+            const myLane = this.player.getData('lane');
+            let nearest = null;
+            let nearestDx = Number.MAX_VALUE;
+            (this.obstacles || []).forEach((o) => {
+                if (o.lane !== myLane) return;
+                const dx = o.sprite.x - this.player.x;
+                if (dx >= 0 && dx < nearestDx) {
+                    nearestDx = dx;
+                    nearest = o;
+                }
+            });
+            if (!nearest) return; // 앞에 장애물이 없으면 점프 무시
+
+            // 허들/물웅덩이 앞에서만 점프 허용: 주황(가능) & 빨강(퍼펙트)
+            const maxRange = this.jumpMaxRange || 380;
+            const successFar = this.jumpSuccessFar || 300;
+            const successNear = this.jumpSuccessNear || 120;
+            if (nearestDx > maxRange) return;
+
+            const inSuccessWindow = nearestDx <= successFar && nearestDx >= successNear;
+
+            // 주황이지만 퍼펙트가 아니면 실패 연출
+            if (!inSuccessWindow) {
+                if (this.playerFailSprite && this.playerFailAnimKey && !this.isFailing) {
+                    this.isFailing = true;
+                    this.playerFailSprite.setPosition(this.player.x, this.player.y);
+                    this.playerFailSprite.setVisible(true);
+                    this.player.setVisible(false);
+                    this.playerFailSprite.play(this.playerFailAnimKey);
+                    this.playerFailSprite.once(Phaser.Animations.Events.ANIMATION_COMPLETE, () => {
+                        if (!this.player) return;
+                        this.player.setVisible(true);
+                        this.playerFailSprite.setVisible(false);
+                        this.isFailing = false;
+                    });
+                }
+                return;
+            }
+
+            // 성공 구간에서만 실제 점프 궤적 처리
+            this.isJumping = true;
+            this.isJumpingSuccess = true;
+
+            const startX = this.player.x;
+            const obstacleWidth = nearest.sprite.displayWidth || 120;
+            const safeMargin = 80;
+            const targetX = Math.min(nearest.sprite.x + obstacleWidth / 2 + safeMargin, TARGET_DISTANCE);
+
+            const baseJumpY = this.player.y - horseSize * 0.7;
+            this.playerJumpSprite.setPosition(startX, baseJumpY);
+            this.playerJumpSprite.setVisible(true);
+            this.player.setVisible(false);
+
+            this.jumpStartX = startX;
+            this.jumpTargetX = targetX;
+            this.jumpBaseY = baseJumpY;
+            this.jumpElapsed = 0;
+
+            this.player.x = targetX;
+            if (this.socket) this.socket.emit('horse_move', { x: this.player.x });
+            if (this.playerJumpAnimKey) this.playerJumpSprite.play(this.playerJumpAnimKey);
+        };
+
+        // RUN 버튼
+        const runButton = new RhythmButton(scene, runBtnX, jumpBtnY, {
+            width: btnEachW,
+            height: btnH,
+            mainColor: 0xff9800,
+            label: 'RUN',
+            fontSize: Math.round(32 * scaleY),
+            pressScale: 0.95,
+            pressOffsetY: Math.round(4 * scaleY),
+            pressDarkenFactor: 0.80,
+            depthPx: Math.max(3, Math.round(6 * scaleY)),
+            onDown: () => tryTapRun()
         });
+
+        // 점프 버튼
+        const jumpButton = new RhythmButton(scene, jumpBtnX, jumpBtnY, {
+            width: btnEachW,
+            height: btnH,
+            mainColor: 0x43a047,
+            label: '점프',
+            fontSize: Math.round(30 * scaleY),
+            pressScale: 0.95,
+            pressOffsetY: Math.round(4 * scaleY),
+            pressDarkenFactor: 0.80,
+            depthPx: Math.max(3, Math.round(6 * scaleY)),
+            onDown: () => doJump()
+        });
+
+        // 글로벌 '아무 곳이나 탭 = run' 예외 처리용
+        this.rhythmRunHitArea = runButton.hitArea;
+        this.rhythmJumpHitArea = jumpButton.hitArea;
 
         const fsBtn = scene.add.text(width - 60, 40, '⛶', { fontSize: '40px', fill: '#fff' }).setInteractive().setScrollFactor(0).setDepth(2000);
         fsBtn.on('pointerdown', () => {
@@ -265,26 +1277,55 @@ class GameScene extends Phaser.Scene {
             else scene.scale.stopFullscreen();
         });
 
+        // 화면 아무 곳이나 터치/클릭 → 달리기 (점프·전체화면 버튼은 제외)
+        scene.input.on('pointerdown', (pointer, gameObjects) => {
+            const top = gameObjects && gameObjects[0];
+            if (top === fsBtn || top === this.rhythmRunHitArea || top === this.rhythmJumpHitArea) return;
+            tryTapRun();
+        });
+
         scene.cameras.main.setBounds(0, 0, TARGET_DISTANCE + 500, height);
         this.bubbleOffsetX = Math.round(160 * scaleY);
-        scene.cameras.main.startFollow(this.player, true, 0.1, 0.1, -350, 0);
+        // 카메라는 플레이어를 따라가되, 화면 중앙에서 약간 왼쪽에 보이도록 오프셋 조정
+        scene.cameras.main.startFollow(this.player, true, 0.1, 0.1, -120, 0);
 
+        // 소켓: 다른 플레이어 위치 실시간 수신 (탭 빠를수록 앞서 나가며, 뒤로 되감기 방지)
         if (this.socket) {
             this.socket.on('horse_position', (data) => {
-                const horse = this.horses[COLOR_ORDER.indexOf(data.color)];
+                const horseIdx = COLOR_ORDER.indexOf(data.color);
+                const horse = this.horses[horseIdx];
                 if (!horse) return;
+                if (this.preStart) return;
                 const isFinish = data.x >= TARGET_DISTANCE;
                 if (data.x > horse.x || isFinish) {
-                    horse.x = isFinish ? TARGET_DISTANCE : data.x;
+                    const newX = isFinish ? TARGET_DISTANCE : data.x;
+                    if (newX !== horse.x) {
+                        horse.x = newX;
+                        horse.setData('lastMoveTime', scene.time.now || 0);
+                        const runKey = `run_${data.color}`;
+                        if (this.anims && this.anims.exists(runKey) && horse.anims && !horse.anims.isPlaying) {
+                            horse.play(runKey);
+                        }
+                        // 원격 말이 움직이면 idle 이미지는 숨김
+                        horse.setVisible(true);
+                        const idleSprite = this.horsesIdle && this.horsesIdle[horseIdx] ? this.horsesIdle[horseIdx] : null;
+                        if (idleSprite) {
+                            idleSprite.setVisible(false);
+                            if (idleSprite.anims) idleSprite.anims.stop();
+                        }
+                    }
                     if (isFinish) {
                         horse.setData('finished', true);
                         if (horse.anims) horse.anims.stop();
-                        const name = (this.nameBubbles && this.nameBubbles[COLOR_ORDER.indexOf(data.color)]) ? this.nameBubbles[COLOR_ORDER.indexOf(data.color)].name : (data.nickname || data.color);
+                        const idx = horseIdx;
+                        const name = (this.nameLabels && this.nameLabels[idx]) ? this.nameLabels[idx].name : (data.nickname || data.color);
                         this.addToFinishOrder(data.color, name);
                     }
                 }
             });
-            this.socket.on('race_finished', (data) => { this.showResult(data); });
+            this.socket.on('race_finished', (data) => {
+                this.showResult(data);
+            });
         }
         this.syncFrameCount = 0;
         this.finishOrder = [];
@@ -292,30 +1333,280 @@ class GameScene extends Phaser.Scene {
     addToFinishOrder(color, name) {
         if (this.finishOrder.some((e) => e.color === color)) return;
         this.finishOrder.push({ color, name });
-    }
-    update() {
-        if (this.nameBubbles) {
-            this.nameBubbles.forEach((item, idx) => {
-                const h = this.horses[idx];
-                if (!h) return;
-                item.container.setPosition(h.x + this.bubbleOffsetX, h.y);
-                const rem = Math.max(0, Math.floor(TARGET_DISTANCE - h.x));
-                this.horsePrevX[idx] = h.x;
-                item.text.setText(item.name + '\n' + rem + 'm');
-            });
+        // 내 말이 결승선을 통과한 경우, 순위 기록
+        if (color === this.myColor) {
+            this.myRank = this.finishOrder.length;
         }
-        this.horses.forEach((h, idx) => {
-            const color = h.getData('color');
-            if (this.playerColors.has(color)) return;
-            if (h.getData('finished')) return;
-            h.x += Phaser.Math.FloatBetween(0.6, 1.2);
-            if (h.x >= TARGET_DISTANCE) {
-                h.setData('finished', true);
-                if (h.anims) h.anims.stop();
-                const name = (this.nameBubbles && this.nameBubbles[idx]) ? this.nameBubbles[idx].name : color;
-                this.addToFinishOrder(color, name);
+    }
+    update(time, delta) {
+        const scene = this;
+        const dt = delta || 16;
+        // 장애물 접근 시: 바닥 주황(점프 가능) 점멸, 퍼펙트 구간만 빨강 펄스
+        const now = this.time.now || 0;
+        const maxRangeZ = this.jumpMaxRange || 380;
+        const successFarZ = this.jumpSuccessFar || 300;
+        const successNearZ = this.jumpSuccessNear || 120;
+        (this.obstacles || []).forEach((o) => {
+            if (!o.zoneOrange) return;
+            const h = this.horses && this.horses[o.lane];
+            if (!h || h.getData('finished')) {
+                o.zoneOrange.setVisible(false);
+                if (o.zonePerfect) o.zonePerfect.setVisible(false);
+                return;
+            }
+            const ox = o.sprite.x;
+            const dx = ox - h.x;
+            if (dx > 0 && dx <= maxRangeZ) {
+                o.zoneOrange.setVisible(true);
+                const blink = 0.22 + 0.55 * (0.5 + 0.5 * Math.sin(now * 0.011));
+                o.zoneOrange.setAlpha(blink);
+                const inPerfect = dx <= successFarZ && dx >= successNearZ;
+                if (o.zonePerfect) {
+                    if (inPerfect) {
+                        o.zonePerfect.setVisible(true);
+                        const pulse = 0.4 + 0.55 * (0.5 + 0.5 * Math.sin(now * 0.022));
+                        o.zonePerfect.setAlpha(pulse);
+                    } else {
+                        o.zonePerfect.setVisible(false);
+                    }
+                }
+            } else {
+                o.zoneOrange.setVisible(false);
+                if (o.zonePerfect) o.zonePerfect.setVisible(false);
             }
         });
+        // 점프 중이면 포물선 궤적으로 위치/높이 업데이트 (성공 케이스만)
+        if (this.isJumping && this.isJumpingSuccess && this.playerJumpSprite) {
+            this.jumpElapsed += dt;
+            const t = Math.min(1, this.jumpElapsed / this.jumpDuration);
+            // X는 시작 위치에서 착지 위치까지 선형 보간
+            const newX = Phaser.Math.Linear(this.jumpStartX, this.jumpTargetX, t);
+            // Y는 포물선 궤적으로 (t=0.5에서 최고점)
+            const jumpHeight = (this.horseSize || 50) * 1.6; // 허들을 살짝 넘는 정도
+            const parabola = 4 * t * (1 - t);   // 0~1~0
+            const newY = this.jumpBaseY - jumpHeight * parabola;
+            this.playerJumpSprite.setPosition(newX, newY);
+
+            if (t >= 1) {
+                // 점프 종료: 말은 착지 위치에서 다시 달리기
+                if (this.player) {
+                    this.player.setVisible(true);
+                    this.player.x = this.jumpTargetX;
+                }
+                this.playerJumpSprite.setVisible(false);
+                this.isJumping = false;
+                this.isJumpingSuccess = false;
+            }
+        }
+
+        // ===== 장애물과의 충돌 감지: 점프하지 않고 그냥 달려가면 실패 애니메이션 =====
+        if (!this.isJumping && !this.isFailing && this.player && !this.player.getData('finished')) {
+            const myLane = this.player.getData('lane');
+            const px = this.player.x;
+            let collided = false;
+            let collidedObstacle = null;
+            (this.obstacles || []).forEach((o) => {
+                if (collided) return;
+                if (o.lane !== myLane) return;
+                const ox = o.sprite.x;
+                const halfW = (o.sprite.displayWidth || 120) * 0.4;
+                // 플레이어가 장애물 중앙 근처 범위를 지나면 충돌로 간주
+                if (px >= ox - halfW && px <= ox + halfW) {
+                    collided = true;
+                    collidedObstacle = { x: ox, halfW };
+                }
+            });
+            if (collided && this.playerFailSprite && this.playerFailAnimKey && collidedObstacle) {
+                this.isFailing = true;
+                this.playerFailSprite.setPosition(this.player.x, this.player.y);
+                this.playerFailSprite.setVisible(true);
+                this.player.setVisible(false);
+                this.playerFailSprite.play(this.playerFailAnimKey);
+                const escapeX = Math.min(
+                    collidedObstacle.x + collidedObstacle.halfW + 60,
+                    TARGET_DISTANCE
+                );
+                this.playerFailSprite.once(Phaser.Animations.Events.ANIMATION_COMPLETE, () => {
+                    if (!this.player) return;
+                    this.player.setVisible(true);
+                    this.player.x = escapeX; // 장애물을 완전히 지난 위치로 이동
+                    if (this.socket) this.socket.emit('horse_move', { x: this.player.x });
+                    this.playerFailSprite.setVisible(false);
+                    this.isFailing = false;
+                });
+            }
+        }
+
+        // ===== 말 정지/달리기 상태 처리 (idle(대기 이미지) ↔ run 애니메이션) =====
+        const idleThreshold = 300; // ms, 이 시간 동안 x 변화가 없으면 idle로 전환
+        const renderShiftX = this.preStart ? this.waitingShiftX : 0;
+
+        this.horses.forEach((h, idx) => {
+            if (!h) return;
+
+            const idleSprite = this.horsesIdle && this.horsesIdle[idx] ? this.horsesIdle[idx] : null;
+            const color = h.getData('color');
+            const idleAnimKey = color ? `idle_${color}` : null;
+            const idleFrame1Key = color ? `idle_${color}_1` : null;
+
+            if (idleSprite) {
+                idleSprite.setPosition(h.x - renderShiftX, h.y);
+            }
+
+            // 점프/실패 연출 중에는 idle 이미지만 표시하지 않도록 우선순위 처리
+            if (h === this.player && (this.isJumping || this.isFailing)) {
+                h.setVisible(false);
+                if (idleSprite) {
+                    idleSprite.setVisible(false);
+                    if (idleSprite.anims) idleSprite.anims.stop();
+                }
+                this.horsePrevX[idx] = h.x;
+                return;
+            }
+
+            const finished = !!h.getData('finished');
+
+            if (this.preStart || finished) {
+                // 출발 전에는 전부 대기 이미지(그리고 보이기만 약간 뒤로)로 표시
+                h.setVisible(false);
+                if (idleSprite) {
+                    idleSprite.setVisible(true);
+                    if (finished) {
+                        if (idleSprite.anims) idleSprite.anims.stop();
+                        if (idleFrame1Key) idleSprite.setTexture(idleFrame1Key);
+                    } else {
+                        if (idleAnimKey && scene.anims.exists(idleAnimKey)) {
+                            if (!idleSprite.anims || !idleSprite.anims.isPlaying) idleSprite.play(idleAnimKey);
+                        }
+                    }
+                }
+                this.horsePrevX[idx] = h.x;
+                return;
+            }
+
+            const lastMove = h.getData('lastMoveTime') || 0;
+            const isMoving = (time || 0) - lastMove <= idleThreshold;
+
+            if (isMoving) {
+                // 최근에 움직였으면 run 표시
+                h.setVisible(true);
+                if (idleSprite) {
+                    idleSprite.setVisible(false);
+                    if (idleSprite.anims) idleSprite.anims.stop();
+                }
+                const runKey = color ? `run_${color}` : null;
+                if (runKey && this.anims && this.anims.exists(runKey) && h.anims && !h.anims.isPlaying) {
+                    h.play(runKey);
+                }
+            } else {
+                // 움직이지 않으면 idle 표시(대기 프레임 루프)
+                h.setVisible(false);
+                if (h.anims) h.anims.stop();
+                if (idleSprite) {
+                    idleSprite.setVisible(true);
+                    if (idleAnimKey && scene.anims.exists(idleAnimKey)) {
+                        if (!idleSprite.anims || !idleSprite.anims.isPlaying) idleSprite.play(idleAnimKey);
+                    }
+                }
+            }
+
+            this.horsePrevX[idx] = h.x;
+        });
+        // 관중 2장 천천히 번갈아 표시 (약 1초 간격)
+        if (this.crowdSprite && this.crowdSprite.active) {
+            this.crowdTick = (this.crowdTick || 0) + 1;
+            if (this.crowdTick >= 55) {
+                this.crowdTick = 0;
+                this.crowdFrame = 1 - (this.crowdFrame || 0);
+                this.crowdSprite.setFrame(this.crowdFrame);
+            }
+        }
+        // 펜스가 카메라 화면에 항상 보이도록 위치 보정
+        if (this.fenceRect && this.fenceRect.active) {
+            this.fenceRect.x = this.cameras.main.scrollX + this.scale.width / 2;
+        }
+        // 말 이름 라벨: 말 후미 쪽에 따라다니도록 위치 갱신
+        if (this.nameLabels) {
+            this.nameLabels.forEach((item, idx) => {
+                const h = this.horses[idx];
+                if (!h) return;
+                const scaleY = this.scale ? (this.scale.height / 960) : 1;
+                const offsetX = Math.round(-80 * scaleY);
+                const offsetY = Math.round(-40 * scaleY);
+                const renderShiftX = this.preStart ? this.waitingShiftX : 0;
+                item.label.setPosition(h.x - renderShiftX + offsetX, h.y + offsetY);
+            });
+        }
+        // 참가 없는 말 = AI: 자동으로 전진 + 장애물 점프/실패 연출, 결승 시 순서 기록
+        if (!this.preStart) {
+            this.horses.forEach((h, idx) => {
+                const color = h.getData('color');
+                if (this.playerColors.has(color)) return;
+                if (h.getData('finished')) return;
+
+                const now = time || 0;
+                const prevX = h.x;
+
+                // 장애물 근처에서 점프/실패 판정 (한 번만 처리)
+                const myLane = h.getData('lane');
+                let nearest = null;
+                let nearestDx = Number.MAX_VALUE;
+                (this.obstacles || []).forEach((o) => {
+                    if (o.lane !== myLane) return;
+                    const dx = o.sprite.x - h.x;
+                    if (dx >= 0 && dx < nearestDx) {
+                        nearestDx = dx;
+                        nearest = o;
+                    }
+                });
+                if (nearest) {
+                    const handledX = h.getData('handledObstacleX') || -9999;
+                    const maxRange = this.jumpMaxRange || 380;
+                    const successFar = this.jumpSuccessFar || 300;
+                    const successNear = this.jumpSuccessNear || 120;
+                    if (nearest.sprite.x !== handledX && nearestDx <= maxRange) {
+                        // AI도 일정 확률로 점프 성공/실패 (예: 70% 성공)
+                        const success = nearestDx <= successFar && nearestDx >= successNear && Math.random() < 0.7;
+                        const obstacleWidth = nearest.sprite.displayWidth || 120;
+                        const safeMargin = 80;
+                        if (success) {
+                            // 허들을 넘은 것처럼 바로 착지 지점으로 이동
+                            h.x = Math.min(nearest.sprite.x + obstacleWidth / 2 + safeMargin, TARGET_DISTANCE);
+                        } else {
+                            // 실패: 잠시 속도 감소 + 약간 뒤로 밀리는 느낌
+                            h.x = Math.max(h.x - 20, 0);
+                            h.setData('aiSlowUntil', now + 900);
+                            if (h.setTint) h.setTint(0xff6666);
+                        }
+                        h.setData('handledObstacleX', nearest.sprite.x);
+                    }
+                }
+
+                // 기본 전진 속도 (실패 후에는 잠시 느리게)
+                const slowUntil = h.getData('aiSlowUntil') || 0;
+                const baseSpeed = Phaser.Math.FloatBetween(0.6, 1.2);
+                const speed = now < slowUntil ? baseSpeed * 0.35 : baseSpeed;
+                if (now >= slowUntil && h.clearTint) {
+                    h.clearTint();
+                }
+                h.x += speed;
+
+                if (h.x !== prevX) {
+                    h.setData('lastMoveTime', now);
+                    const runKey = color ? `run_${color}` : null;
+                    if (runKey && scene.anims.exists(runKey) && h.anims && !h.anims.isPlaying) {
+                        h.play(runKey);
+                    }
+                }
+
+                if (h.x >= TARGET_DISTANCE) {
+                    h.setData('finished', true);
+                    if (h.anims) h.anims.stop();
+                    const name = (this.nameLabels && this.nameLabels[idx]) ? this.nameLabels[idx].name : color;
+                    this.addToFinishOrder(color, name);
+                }
+            });
+        }
 
         if (this.player && this.player.x >= TARGET_DISTANCE && !this.player.getData('finished')) {
             this.player.setData('finished', true);
@@ -327,14 +1618,15 @@ class GameScene extends Phaser.Scene {
                 this.socket.emit('player_finished', {});
             }
         }
-        const allFinished = this.horses.length > 0 && this.horses.every((h) => h.getData('finished'));
-        if (allFinished && this.finishOrder.length > 0 && !this.resultShown) {
+        if (this.finishOrder.length > 0 && !this.resultShown) {
             const first = this.finishOrder[0];
             const isWinner = first.color === this.myColor;
             this.showResult({ winnerNickname: first.name, winnerColor: first.color, isWinner: isWinner });
             return;
         }
         if (!this.player || this.player.getData('finished')) return;
+        if (this.preStart) return;
+        // 매 프레임에 가깝게 내 위치 전송 → 다른 유저 화면에 실시간 반영 (탭 빠를수록 앞서 나감)
         this.syncFrameCount = (this.syncFrameCount || 0) + 1;
         if (this.socket && this.syncFrameCount % 3 === 0) {
             this.socket.emit('horse_move', { x: this.player.x });
@@ -348,15 +1640,118 @@ class GameScene extends Phaser.Scene {
         const { width, height } = scene.scale;
         const isWinner = data.winnerNickname === (window.gameState && window.gameState.myNickname);
         const depth = 5000;
-        scene.add.rectangle(width / 2, height / 2, width, height, 0x000000, 0.85).setScrollFactor(0).setDepth(depth);
-        scene.add.text(width / 2, height / 2 - 80, isWinner ? '축하합니다!\n우승!' : (data.winnerNickname + ' 우승!'), { fontSize: '48px', fill: '#fff', fontStyle: 'bold', align: 'center' }).setOrigin(0.5).setScrollFactor(0).setDepth(depth + 1);
-        const btnW = 200;
-        const btnH = 56;
-        const gap = 24;
-        const btnAgain = scene.add.rectangle(width / 2 - gap / 2 - btnW / 2, height / 2 + 50, btnW, btnH, 0x43a047).setScrollFactor(0).setDepth(depth + 2).setInteractive({ useHandCursor: true });
-        scene.add.text(width / 2 - gap / 2 - btnW / 2, height / 2 + 50, '다시 하기', { fontSize: '24px', fill: '#fff', fontStyle: 'bold' }).setOrigin(0.5).setScrollFactor(0).setDepth(depth + 3);
-        const btnExit = scene.add.rectangle(width / 2 + gap / 2 + btnW / 2, height / 2 + 50, btnW, btnH, 0x757575).setScrollFactor(0).setDepth(depth + 2).setInteractive({ useHandCursor: true });
-        scene.add.text(width / 2 + gap / 2 + btnW / 2, height / 2 + 50, '나가기', { fontSize: '24px', fill: '#fff', fontStyle: 'bold' }).setOrigin(0.5).setScrollFactor(0).setDepth(depth + 3);
+        // 전체 화면 어두운 배경
+        scene.add.rectangle(width / 2, height / 2, width, height, 0x000000, 0.85)
+            .setScrollFactor(0)
+            .setDepth(depth);
+
+        // 화면 크기에 따라 아주 크게 보이는 승리 문구
+        const baseSize = Math.min(width, height);
+        const titleFontSize = Math.round(baseSize * 0.09);     // 메인 문구
+        const buttonFontSize = Math.round(baseSize * 0.045);   // 버튼 텍스트
+
+        scene.add.text(
+            width / 2,
+            height / 2 - titleFontSize,
+            isWinner ? '축하합니다!\n우승!' : (data.winnerNickname + ' 우승!'),
+            {
+                fontSize: titleFontSize + 'px',
+                fill: '#fff',
+                fontStyle: 'bold',
+                align: 'center'
+            }
+        )
+            .setOrigin(0.5)
+            .setScrollFactor(0)
+            .setDepth(depth + 1);
+
+        // 버튼도 화면 비율에 맞춰 아주 크게
+        const btnW = Math.min(width * 0.36, 420);
+        const btnH = Math.min(height * 0.10, 120);
+        const gap = Math.max(32, Math.round(width * 0.04));
+        const buttonY = height / 2 + btnH;
+
+        const btnAgainX = width / 2 - gap / 2 - btnW / 2;
+        const btnExitX = width / 2 + gap / 2 + btnW / 2;
+
+        const btnAgain = scene.add.rectangle(btnAgainX, buttonY, btnW, btnH, 0x43a047)
+            .setScrollFactor(0)
+            .setDepth(depth + 2)
+            .setInteractive({ useHandCursor: true });
+        scene.add.text(
+            btnAgainX,
+            buttonY,
+            '다시 하기',
+            {
+                fontSize: buttonFontSize + 'px',
+                fill: '#fff',
+                fontStyle: 'bold'
+            }
+        )
+            .setOrigin(0.5)
+            .setScrollFactor(0)
+            .setDepth(depth + 3);
+
+        const btnExit = scene.add.rectangle(btnExitX, buttonY, btnW, btnH, 0x757575)
+            .setScrollFactor(0)
+            .setDepth(depth + 2)
+            .setInteractive({ useHandCursor: true });
+        scene.add.text(
+            btnExitX,
+            buttonY,
+            '나가기',
+            {
+                fontSize: buttonFontSize + 'px',
+                fill: '#fff',
+                fontStyle: 'bold'
+            }
+        )
+            .setOrigin(0.5)
+            .setScrollFactor(0)
+            .setDepth(depth + 3);
+
+        // ===== 결과 등수 리스트 (갤러그 스타일 하이스코어 보드) =====
+        if (this.finishOrder && this.finishOrder.length) {
+            const baseY = buttonY + btnH + Math.round(40 * (height / 960));
+            const title = scene.add.text(
+                width / 2,
+                baseY,
+                'RANK   NAME            SCORE',
+                {
+                    fontSize: Math.round(26 * (height / 960)) + 'px',
+                    fill: '#ffeb3b',
+                    fontStyle: 'bold',
+                    stroke: '#000000',
+                    strokeThickness: 4,
+                    fontFamily: 'monospace',
+                    align: 'center'
+                }
+            ).setOrigin(0.5, 0).setScrollFactor(0).setDepth(depth + 4);
+
+            const lineHeight = Math.round(30 * (height / 960));
+            this.finishOrder.forEach((e, i) => {
+                const rank = i + 1;
+                const isMe = e.color === this.myColor;
+                const score = Math.max(0, (4 - rank + 1) * 100);
+                const rankStr = rank.toString().padStart(2, ' ');
+                const nameStr = (e.name || '').padEnd(12, ' ').slice(0, 12);
+                const scoreStr = score.toString().padStart(4, ' ');
+                const lineText = `${rankStr}    ${nameStr}    ${scoreStr}`;
+                scene.add.text(
+                    width / 2,
+                    baseY + (i + 1) * lineHeight,
+                    (isMe ? '★ ' : '  ') + lineText,
+                    {
+                        fontSize: Math.round(24 * (height / 960)) + 'px',
+                        fill: isMe ? '#00e5ff' : '#ffffff',
+                        stroke: '#000000',
+                        strokeThickness: 3,
+                        fontFamily: 'monospace',
+                        align: 'center'
+                    }
+                ).setOrigin(0.5, 0).setScrollFactor(0).setDepth(depth + 4);
+            });
+        }
         btnAgain.on('pointerdown', () => { location.reload(); });
         btnExit.on('pointerdown', () => {
             if (window.gameState && window.gameState.socket) window.gameState.socket.disconnect();
@@ -365,19 +1760,34 @@ class GameScene extends Phaser.Scene {
     }
 }
 
-const config = {
-    type: Phaser.AUTO,
-    parent: 'game-container',
-    scale: {
-        mode: Phaser.Scale.FIT,
-        autoCenter: Phaser.Scale.CENTER_BOTH,
-        width: 1280,
-        height: 1800
-    },
-    physics: { default: 'arcade' },
-    scene: [PreloadScene, TitleScene, LobbyScene, GameScene]
-};
-new Phaser.Game(config);
+// ========== Phaser Config & Start ==========
+function startGame() {
+    if (typeof Phaser === 'undefined') {
+        var el = document.getElementById('ui-overlay');
+        if (el) { el.classList.add('active'); el.classList.remove('hidden'); }
+        var p = document.getElementById('title-panel');
+        if (p) { p.classList.remove('hidden'); p.innerHTML = '<h1>경주마 스타트 Pro</h1><p class="sub">스크립트를 불러오지 못했습니다.</p><p style="color:#b0a090;font-size:14px;margin-top:12px;">네트워크를 확인하거나 새로고침 해 주세요.</p>'; }
+        return;
+    }
+    var config = {
+        type: Phaser.AUTO,
+        parent: 'game-container',
+        scale: {
+            mode: Phaser.Scale.FIT,
+            autoCenter: Phaser.Scale.CENTER_BOTH,
+            width: 1280,
+            height: 2200
+        },
+        physics: { default: 'arcade' },
+        scene: [PreloadScene, TitleScene, LobbyScene, GameScene]
+    };
+    new Phaser.Game(config);
+}
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', startGame);
+} else {
+    startGame();
+}
 </script>
 </body>
 </html>

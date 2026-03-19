@@ -241,9 +241,11 @@ class TitleScene extends Phaser.Scene {
             // Netlify(정적) + Render(소켓) 조합에서 XHR polling이 막히면 오류가 납니다.
             // polling fallback을 끄고 websocket 전송만 사용합니다.
             const socket = io(SOCKET_URL || window.location.origin, {
-                transports: ['websocket'],
+                // polling -> websocket 업그레이드로 폴백(서버/프록시 환경에 따라 websocket 단독이 404 날 수 있음)
+                transports: ['polling', 'websocket'],
                 path: '/socket.io',
-                withCredentials: false
+                withCredentials: false,
+                upgrade: true
             });
             socket.emit('set_nickname', nickname);
             socket.emit('create_or_join');

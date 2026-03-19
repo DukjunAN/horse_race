@@ -242,7 +242,8 @@ class TitleScene extends Phaser.Scene {
             // polling fallback을 끄고 websocket 전송만 사용합니다.
             const socket = io(SOCKET_URL || window.location.origin, {
                 transports: ['websocket'],
-                upgrade: true
+                path: '/socket.io',
+                withCredentials: false
             });
             socket.emit('set_nickname', nickname);
             socket.emit('create_or_join');

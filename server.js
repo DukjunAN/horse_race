@@ -27,7 +27,12 @@ app.get('/crowd.png', (req, res) => {
 });
 
 const io = new Server(server, {
-  cors: { origin: '*' },
+  // Netlify(다른 Origin) → Render(WebSocket) 연결에서 CORS/Origin 관련 이슈를 최소화
+  cors: {
+    origin: (origin, cb) => cb(null, true),
+    methods: ['GET', 'POST'],
+    credentials: false
+  },
   pingTimeout: 60000,
   pingInterval: 25000
 });

@@ -36,6 +36,15 @@ app.use((req, res, next) => {
   next();
 });
 
+// Netlify 등 다른 도메인에서 Render API(/api/*) 호출 가능하도록 CORS 허용
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  next();
+});
+
 // 정적 파일: 로컬/통합 테스트 시 루트에서 index.html 제공. Netlify 배포 시 프론트는 Netlify에서 서빙.
 app.use(express.static(__dirname));
 // crowd.png 직접 경로 (캐시 방지용)

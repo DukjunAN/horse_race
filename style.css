@@ -31,7 +31,9 @@ body {
   justify-content: center;
   min-height: 100vh;
   padding: 24px;
-  background: linear-gradient(180deg, #2d1f0f 0%, #1a1a1a 100%);
+  background:
+    linear-gradient(180deg, rgba(0, 0, 0, 0.35) 0%, rgba(0, 0, 0, 0.55) 100%),
+    url('title.png') center center / cover no-repeat;
 }
 
 .title-panel h1 {
@@ -44,7 +46,35 @@ body {
 .title-panel .sub {
   color: #b0a090;
   font-size: clamp(14px, 2.5vw, 18px);
-  margin-bottom: 32px;
+  margin-bottom: 14px;
+}
+.title-top3 {
+  width: 100%;
+  max-width: 420px;
+  margin-bottom: 18px;
+  padding: 10px 14px;
+  border: 1px solid rgba(255, 245, 157, 0.45);
+  border-radius: 10px;
+  background: rgba(10, 25, 15, 0.58);
+  color: #e8f5e9;
+}
+.title-top3-head {
+  font-size: clamp(12px, 2vw, 14px);
+  color: #fff59d;
+  margin-bottom: 6px;
+  font-weight: bold;
+}
+.title-top3 ul {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.title-top3 li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: clamp(12px, 2vw, 14px);
 }
 
 .nickname-wrap {
@@ -54,6 +84,11 @@ body {
   gap: 12px;
   width: 100%;
   max-width: 360px;
+}
+.title-actions {
+  width: 100%;
+  display: flex;
+  gap: 10px;
 }
 
 .nickname-wrap input {
@@ -83,6 +118,9 @@ body {
 }
 .btn-start:active { transform: scale(0.98); }
 .btn-start:disabled { opacity: 0.6; cursor: not-allowed; }
+.btn-start.secondary {
+  background: linear-gradient(180deg, #5c5c5c 0%, #333 100%);
+}
 
 /* ========== Lobby Scene ========== */
 .lobby-panel {

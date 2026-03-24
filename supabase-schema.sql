@@ -22,3 +22,18 @@ $$;
 
 -- RLS 사용 시: alter table player_stats enable row level security;
 -- 서비스 역할로 호출 시 RLS 우회 가능.
+
+-- 3) 결승선 도착 기록 (레이스 ID + 말 색상당 1행, 서버에서 upsert)
+create table if not exists race_results (
+  id uuid primary key default gen_random_uuid(),
+  race_id text not null,
+  color text not null,
+  nickname text not null,
+  rank int not null default 0,
+  finish_time_sec numeric,
+  created_at timestamptz default now(),
+  unique (race_id, color)
+);
+
+create index if not exists idx_race_results_race_id on race_results (race_id);
+create index if not exists idx_race_results_created_at on race_results (created_at desc);

@@ -8,7 +8,7 @@
     "dev": "node server.js",
     "cap:sync": "npx cap sync",
     "cap:android": "npx cap open android",
-    "copy:www": "node -e \"const fs=require('fs');['index.html','style.css'].forEach(f=>fs.copyFileSync(f,'www/'+f));['horse1.png','horse2.png','horse3.png','horse4.png'].forEach(f=>{if(fs.existsSync(f))fs.copyFileSync(f,'www/'+f);});const srcDir='assets/horse';const dstDir='www/assets/horse';if(fs.existsSync(srcDir)){fs.mkdirSync(dstDir,{recursive:true});fs.readdirSync(srcDir).filter(f=>f.toLowerCase().endsWith('.png')).forEach(f=>fs.copyFileSync(srcDir+'/'+f,dstDir+'/'+f));}\""
+    "copy:www": "node -e \"const fs=require('fs');['index.html','style.css'].forEach(f=>fs.copyFileSync(f,'www/'+f));['title.png','single_track.png','brown_horse_blue_man_run.png','basie_horse_yellow_man_run.png','black_horse_red_man_run.png','brownspot_horse_green_man_run.png','brown_horse_blue_man_stand.png','basie_horse_yellow_man_stand.png','black_horse_red_man_stand.png','brownspot_horse_green_man_stand.png','brown_horse_blue_main_jump.png','black_horse_red_man_jump.png','basie_horse_yellow_man_jump.png','brownspot_horse_green_man_jump.png','brown_horse_blue_man_fail.png','brownspot_horse_green_man_fail.png','horse1.png','horse2.png','horse3.png','horse4.png'].forEach(f=>{if(fs.existsSync(f))fs.copyFileSync(f,'www/'+f);});const copyPngDir=(s,d)=>{if(!fs.existsSync(s))return;fs.mkdirSync(d,{recursive:true});fs.readdirSync(s).filter(f=>f.toLowerCase().endsWith('.png')).forEach(f=>fs.copyFileSync(s+'/'+f,d+'/'+f));};copyPngDir('assets/horse','www/assets/horse');\""
   },
   "capacitor": {
     "includesSource": false

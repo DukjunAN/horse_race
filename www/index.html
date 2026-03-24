@@ -716,6 +716,7 @@ class GameScene extends Phaser.Scene {
         this.aiFailActionDurationMs = 900;
         this.firstFinishAtMs = null;
         this.finishCountdownText = null;
+        this.serverWinnerData = null;
     }
     create() {
         const scene = this;
@@ -2217,7 +2218,8 @@ class GameScene extends Phaser.Scene {
                 }
             });
             this.socket.on('race_finished', (data) => {
-                this.showResult(data);
+                // 서버 우승 정보는 저장만 하고, 결과창은 카운트다운/타임아웃 처리 후 표시
+                this.serverWinnerData = data || null;
             });
         }
         this.syncFrameCount = 0;
@@ -2245,7 +2247,8 @@ class GameScene extends Phaser.Scene {
         // DB: 방장은 모든 말 기록, 비방장은 본인 말만 전송 (서버에서 검증)
         if (this.socket && this.raceId) {
             const isHostUser = window.gameState && window.gameState.isHost;
-            if (isHostUser || color === this.myColor) {
+            const isHumanColor = this.playerColors && this.playerColors.has(color);
+            if (isHumanColor && (isHostUser || color === this.myColor)) {
                 this.socket.emit('race_time_record', {
                     raceId: this.raceId,
                     color,
@@ -2748,7 +2751,7 @@ class GameScene extends Phaser.Scene {
                     : 0;
                 this.player.setData('finishTimeSec', fts);
                 this.addToFinishOrder(this.myColor, window.gameState?.myNickname || this.myColor, fts);
-                if (this.socket && this.finishOrder[0] && this.finishOrder[0].color === this.myColor) {
+                if (this.socket) {
                     this.socket.emit('horse_move', { x: TARGET_DISTANCE, finishTimeSec: fts });
                     this.socket.emit('player_finished', { finishTimeSec: fts });
                 }
@@ -2807,8 +2810,9 @@ class GameScene extends Phaser.Scene {
         const allRaceFinished = this.horses && this.horses.length > 0 && this.horses.every((h) => h && h.getData('finished'));
         if (allRaceFinished && this.finishOrder.length > 0 && !this.resultShown) {
             const first = this.finishOrder[0];
-            const isWinner = first.color === this.myColor;
-            this.showResult({ winnerNickname: first.name, winnerColor: first.color, isWinner: isWinner });
+            const winner = this.serverWinnerData || { winnerNickname: first.name, winnerColor: first.color };
+            const isWinner = winner.winnerColor === this.myColor;
+            this.showResult({ ...winner, isWinner });
             return;
         }
         if (!this.player || this.player.getData('finished')) return;

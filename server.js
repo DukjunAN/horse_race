@@ -155,6 +155,7 @@ function createRoom() {
     status: 'waiting', // waiting | started
     countdownTimer: null,
     currentObstacles: [],
+    winnerSocketId: null,
     createdAt: Date.now()
   };
   rooms.set(roomId, room);
@@ -179,6 +180,7 @@ function startGameForRoom(roomId) {
   stopCountdown(room);
   room.status = 'started';
   room.currentObstacles = generateObstacles();
+  room.winnerSocketId = null;
   io.to(roomId).emit('game_start', {
     players: getPlayersInRoom(room),
     obstacles: room.currentObstacles,
@@ -436,6 +438,9 @@ io.on('connection', (socket) => {
     if (!me) return;
     const finishTimeSec =
       data && typeof data.finishTimeSec === 'number' ? data.finishTimeSec : null;
+    // 방 단위 최초 도착자만 우승자로 확정
+    if (room.winnerSocketId) return;
+    room.winnerSocketId = socket.id;
     io.to(roomId).emit('race_finished', {
       winnerNickname: me.nickname,
       winnerColor: me.color,

@@ -59,6 +59,7 @@ const _isLocalHost =
 const SOCKET_URL =
     window.SOCKET_URL ||
     (_isLocalHost ? window.location.origin : 'https://horse-race-qo6o.onrender.com');
+const API_BASE_URL = (SOCKET_URL || window.location.origin).replace(/\/$/, '');
 
 const TARGET_DISTANCE = 8000;
 /** AI(컴퓨터) 말 전진 속도 배율 — 기본 0.6~1.2에 곱해짐 */
@@ -237,8 +238,11 @@ class TitleScene extends Phaser.Scene {
                 return `<li><span>${i + 1}. ${name}</span><b>${time}</b></li>`;
             }).join('');
         };
-        fetch('/api/top-times?trackId=single_track&limit=3')
-            .then((r) => r.json())
+        fetch(`${API_BASE_URL}/api/top-times?trackId=single_track&limit=3`)
+            .then((r) => {
+                if (!r.ok) throw new Error('top-times fetch failed');
+                return r.json();
+            })
             .then((data) => renderTopTimes(data && data.top))
             .catch(() => {
                 if (top3ListEl) top3ListEl.innerHTML = '<li>기록을 불러오지 못했습니다.</li>';

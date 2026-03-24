@@ -63,7 +63,7 @@ const API_BASE_URL = (SOCKET_URL || window.location.origin).replace(/\/$/, '');
 
 const TARGET_DISTANCE = 8000;
 /** AI(컴퓨터) 말 전진 속도 배율 — 기본 0.6~1.2에 곱해짐 */
-const AI_RUN_SPEED_MULTIPLIER = 1.5;
+const AI_RUN_SPEED_MULTIPLIER = 1.8;
 const COLOR_ORDER = ['red', 'blue', 'green', 'yellow'];
 const HORSE_COLORS_HEX = { red: 0xe53935, blue: 0x1e88e5, green: 0x43a047, yellow: 0xfdd835 };
 /** 달리기 6프레임 스프라이트시트 (팀 색 순서와 매칭) */
@@ -709,6 +709,7 @@ class GameScene extends Phaser.Scene {
         this.aiFailActionDurationMs = 900;
         /** 1등 결승 시각(ms): 10초 지나면 미완주자는 TIMEOUT 처리 */
         this.firstFinishAtMs = null;
+        this.finishCountdownText = null;
     }
     create() {
         const scene = this;
@@ -2647,7 +2648,7 @@ class GameScene extends Phaser.Scene {
                 // 장애물 근처에서 점프/실패 판정 (한 장애물당 한 번)
                 const myLane = h.getData('lane');
                 const slowUntil = h.getData('aiSlowUntil') || 0;
-                const baseSpeed = Phaser.Math.FloatBetween(0.6, 1.2);
+                const baseSpeed = Phaser.Math.FloatBetween(0.9, 1.55);
                 const speed = (now < slowUntil ? baseSpeed * 0.35 : baseSpeed) * AI_RUN_SPEED_MULTIPLIER;
                 const lastAiX = prevX;
 
@@ -2801,6 +2802,29 @@ class GameScene extends Phaser.Scene {
                 doPlayerFinish();
             }
         }
+        // 1등 결승 후 10초 카운트다운 표시
+        if (!this.resultShown && this.firstFinishAtMs != null) {
+            const nowMs = this.time.now || 0;
+            const remainSec = Math.max(0, Math.ceil((10000 - (nowMs - this.firstFinishAtMs)) / 1000));
+            if (!this.finishCountdownText) {
+                this.finishCountdownText = this.add.text(
+                    this.scale.width / 2,
+                    Math.round(this.scale.height * 0.08),
+                    '',
+                    {
+                        fontSize: Math.round(Math.min(this.scale.width, this.scale.height) * 0.05) + 'px',
+                        fill: '#ffe082',
+                        fontStyle: 'bold',
+                        stroke: '#000000',
+                        strokeThickness: 4
+                    }
+                ).setOrigin(0.5).setScrollFactor(0).setDepth(4200);
+            }
+            this.finishCountdownText.setText(`RESULT IN ${remainSec}`);
+            this.finishCountdownText.setVisible(true);
+        } else if (this.finishCountdownText) {
+            this.finishCountdownText.setVisible(false);
+        }
         // 1등 결승 후 10초 내 미완주자는 TIMEOUT 처리
         if (!this.resultShown && this.finishOrder.length > 0 && this.firstFinishAtMs != null) {
             const nowMs = this.time.now || 0;
@@ -2835,6 +2859,10 @@ class GameScene extends Phaser.Scene {
     showResult(data) {
         if (this.resultShown) return;
         this.resultShown = true;
+        if (this.finishCountdownText) {
+            this.finishCountdownText.destroy();
+            this.finishCountdownText = null;
+        }
         if (this.socket) this.socket.removeAllListeners();
         const scene = this;
         const { width, height } = scene.scale;

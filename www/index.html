@@ -63,7 +63,7 @@ const API_BASE_URL = (SOCKET_URL || window.location.origin).replace(/\/$/, '');
 
 const TARGET_DISTANCE = 8000;
 /** AI(컴퓨터) 말 전진 속도 배율 — 기본 0.6~1.2에 곱해짐 */
-const AI_RUN_SPEED_MULTIPLIER = 1.5;
+const AI_RUN_SPEED_MULTIPLIER = 1.8;
 const COLOR_ORDER = ['red', 'blue', 'green', 'yellow'];
 const HORSE_COLORS_HEX = { red: 0xe53935, blue: 0x1e88e5, green: 0x43a047, yellow: 0xfdd835 };
 /** 달리기 6프레임 스프라이트시트 (팀 색 순서와 매칭) */
@@ -714,6 +714,8 @@ class GameScene extends Phaser.Scene {
         this.playerFailLockUntil = 0;
         this.aiJumpActionDurationMs = 520;
         this.aiFailActionDurationMs = 900;
+        this.firstFinishAtMs = null;
+        this.finishCountdownText = null;
     }
     create() {
         const scene = this;
@@ -2221,16 +2223,20 @@ class GameScene extends Phaser.Scene {
         this.syncFrameCount = 0;
         this.finishOrder = [];
     }
-    addToFinishOrder(color, name, finishTimeSec) {
+    addToFinishOrder(color, name, finishTimeSec, timedOut = false) {
         if (this.finishOrder.some((e) => e.color === color)) return;
         let ft = finishTimeSec;
-        if (ft == null && this.raceStartAt) {
+        if (ft == null && this.raceStartAt && !timedOut) {
             ft = Math.max(0, ((this.time.now || 0) - this.raceStartAt) / 1000);
         }
-        this.finishOrder.push({ color, name, finishTimeSec: ft });
+        this.finishOrder.push({ color, name, finishTimeSec: ft, timedOut: !!timedOut });
+        if (this.finishOrder.length === 1 && !timedOut) {
+            this.firstFinishAtMs = this.time.now || 0;
+        }
         const cidx = typeof COLOR_ORDER !== 'undefined' ? COLOR_ORDER.indexOf(color) : -1;
         if (cidx >= 0 && this.horses && this.horses[cidx]) {
             this.horses[cidx].setData('finishTimeSec', ft);
+            this.horses[cidx].setData('timedOut', !!timedOut);
         }
         // 내 말이 결승선을 통과한 경우, 순위 기록
         if (color === this.myColor) {
@@ -2610,7 +2616,7 @@ class GameScene extends Phaser.Scene {
                 // 장애물 근처에서 점프/실패 판정 (한 장애물당 한 번)
                 const myLane = h.getData('lane');
                 const slowUntil = h.getData('aiSlowUntil') || 0;
-                const baseSpeed = Phaser.Math.FloatBetween(0.6, 1.2);
+                const baseSpeed = Phaser.Math.FloatBetween(0.9, 1.55);
                 const speed = (now < slowUntil ? baseSpeed * 0.35 : baseSpeed) * AI_RUN_SPEED_MULTIPLIER;
                 const lastAiX = prevX;
 
@@ -2760,7 +2766,46 @@ class GameScene extends Phaser.Scene {
                 doPlayerFinish();
             }
         }
-        if (this.finishOrder.length > 0 && !this.resultShown) {
+        if (!this.resultShown && this.firstFinishAtMs != null) {
+            const nowMs = this.time.now || 0;
+            const remainSec = Math.max(0, Math.ceil((10000 - (nowMs - this.firstFinishAtMs)) / 1000));
+            if (!this.finishCountdownText) {
+                this.finishCountdownText = this.add.text(
+                    this.scale.width / 2,
+                    Math.round(this.scale.height * 0.08),
+                    '',
+                    {
+                        fontSize: Math.round(Math.min(this.scale.width, this.scale.height) * 0.05) + 'px',
+                        fill: '#ffe082',
+                        fontStyle: 'bold',
+                        stroke: '#000000',
+                        strokeThickness: 4
+                    }
+                ).setOrigin(0.5).setScrollFactor(0).setDepth(4200);
+            }
+            this.finishCountdownText.setText(`RESULT IN ${remainSec}`);
+            this.finishCountdownText.setVisible(true);
+        } else if (this.finishCountdownText) {
+            this.finishCountdownText.setVisible(false);
+        }
+        // 1등 결승 후 10초 내 미완주자는 TIMEOUT 처리
+        if (!this.resultShown && this.finishOrder.length > 0 && this.firstFinishAtMs != null) {
+            const nowMs = this.time.now || 0;
+            if (nowMs - this.firstFinishAtMs >= 10000) {
+                this.horses.forEach((h, idx) => {
+                    if (!h || h.getData('finished')) return;
+                    h.setData('finished', true);
+                    h.setData('timedOut', true);
+                    h.setData('finishTimeSec', null);
+                    if (h.anims) h.anims.stop();
+                    const color = h.getData('color') || COLOR_ORDER[idx];
+                    const name = (this.nameLabels && this.nameLabels[idx]) ? this.nameLabels[idx].name : color;
+                    this.addToFinishOrder(color, name, null, true);
+                });
+            }
+        }
+        const allRaceFinished = this.horses && this.horses.length > 0 && this.horses.every((h) => h && h.getData('finished'));
+        if (allRaceFinished && this.finishOrder.length > 0 && !this.resultShown) {
             const first = this.finishOrder[0];
             const isWinner = first.color === this.myColor;
             this.showResult({ winnerNickname: first.name, winnerColor: first.color, isWinner: isWinner });
@@ -2777,6 +2822,10 @@ class GameScene extends Phaser.Scene {
     showResult(data) {
         if (this.resultShown) return;
         this.resultShown = true;
+        if (this.finishCountdownText) {
+            this.finishCountdownText.destroy();
+            this.finishCountdownText = null;
+        }
         if (this.socket) this.socket.removeAllListeners();
         const scene = this;
         const { width, height } = scene.scale;
@@ -2858,7 +2907,7 @@ class GameScene extends Phaser.Scene {
             const title = scene.add.text(
                 width / 2,
                 baseY,
-                'RANK   NAME            SCORE',
+                'RANK   NAME            TIME',
                 {
                     fontSize: Math.round(26 * (height / 960)) + 'px',
                     fill: '#ffeb3b',
@@ -2871,14 +2920,13 @@ class GameScene extends Phaser.Scene {
             ).setOrigin(0.5, 0).setScrollFactor(0).setDepth(depth + 4);
 
             const lineHeight = Math.round(30 * (height / 960));
-            this.finishOrder.forEach((e, i) => {
+            this.finishOrder.slice(0, 4).forEach((e, i) => {
                 const rank = i + 1;
                 const isMe = e.color === this.myColor;
-                const score = Math.max(0, (4 - rank + 1) * 100);
                 const rankStr = rank.toString().padStart(2, ' ');
                 const nameStr = (e.name || '').padEnd(12, ' ').slice(0, 12);
-                const scoreStr = score.toString().padStart(4, ' ');
-                const lineText = `${rankStr}    ${nameStr}    ${scoreStr}`;
+                const timeStr = (e.timedOut ? 'TIMEOUT' : formatFinishTimeDisplay(e.finishTimeSec)).padStart(7, ' ');
+                const lineText = `${rankStr}    ${nameStr}    ${timeStr}`;
                 scene.add.text(
                     width / 2,
                     baseY + (i + 1) * lineHeight,

@@ -172,9 +172,102 @@ class HorseGameSound {
     }
 
     jump() {
-        this.tone(600, 0.05);
-        setTimeout(() => this.tone(800, 0.05), 40);
-        setTimeout(() => this.tone(1000, 0.05), 80);
+        if (!AudioContextCtor) return;
+        this.resume().then(() => this.playJumpBfxr());
+    }
+
+    /** Bfxr "Jump30" preset 근사 (Web Audio) */
+    playJumpBfxr() {
+        const p = {
+            masterVolume: 0.5,
+            waveType: 0,
+            attackTime: 0,
+            sustainTime: 0.3070210292689184,
+            sustainPunch: 0,
+            decayTime: 0.260827637995759,
+            frequency_start: 0.39975008380099436,
+            frequency_slide: 0.23693088191539485,
+            squareDuty: 0.05319536530916023
+        };
+        const ctx = this.ctx;
+        const t0 = ctx.currentTime;
+        const atk = Math.max(0, p.attackTime);
+        const sus = Math.max(0.001, p.sustainTime);
+        const dec = Math.max(0.001, p.decayTime);
+        const total = atk + sus + dec;
+        const f0 = 40 + p.frequency_start * p.frequency_start * (2000 - 40);
+        const slideMul = 1 + p.frequency_slide * 3.5;
+        const f1 = Math.min(11000, Math.max(f0 * 0.5 + 1, f0 * slideMul));
+        const peak = Math.min(0.4, p.masterVolume * 0.32) * (1 + p.sustainPunch);
+        const eps = 0.0001;
+
+        const osc = ctx.createOscillator();
+        const duty = Math.min(0.49, Math.max(0.02, p.squareDuty));
+        try {
+            const n = 32;
+            const real = new Float32Array(n);
+            const imag = new Float32Array(n);
+            for (let k = 1; k < n; k++) {
+                imag[k] = (2 / (k * Math.PI)) * Math.sin(k * Math.PI * duty);
+            }
+            osc.setPeriodicWave(ctx.createPeriodicWave(real, imag, { disableNormalization: false }));
+        } catch (e) {
+            osc.type = p.waveType === 0 ? 'square' : 'sine';
+        }
+
+        osc.frequency.setValueAtTime(f0, t0 + atk);
+        osc.frequency.exponentialRampToValueAtTime(f1, t0 + Math.min(total * 0.92, total - 0.02));
+
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(eps, t0);
+        g.gain.linearRampToValueAtTime(peak, t0 + atk + 0.002);
+        g.gain.setValueAtTime(peak, t0 + atk + sus);
+        g.gain.exponentialRampToValueAtTime(eps, t0 + atk + sus + dec);
+
+        osc.connect(g);
+        g.connect(this.master);
+        osc.start(t0);
+        osc.stop(t0 + total + 0.06);
+    }
+
+    playCount() {
+        if (!AudioContextCtor) return;
+        this.resume().then(() => this.playCountNow());
+    }
+
+    playCountNow() {
+        const ctx = this.ctx;
+        const t0 = ctx.currentTime;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(1000, t0);
+        gain.gain.setValueAtTime(0.1, t0);
+        gain.gain.exponentialRampToValueAtTime(0.001, t0 + 0.15);
+        osc.connect(gain);
+        gain.connect(this.master);
+        osc.start(t0);
+        osc.stop(t0 + 0.15);
+    }
+
+    playGo() {
+        if (!AudioContextCtor) return;
+        this.resume().then(() => this.playGoNow());
+    }
+
+    playGoNow() {
+        const ctx = this.ctx;
+        const t0 = ctx.currentTime;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(1500, t0);
+        gain.gain.setValueAtTime(0.15, t0);
+        gain.gain.exponentialRampToValueAtTime(0.001, t0 + 0.8);
+        osc.connect(gain);
+        gain.connect(this.master);
+        osc.start(t0);
+        osc.stop(t0 + 0.8);
     }
 
     goal() {
@@ -1429,17 +1522,38 @@ class GameScene extends Phaser.Scene {
                 }
             ).setOrigin(0.5).setDepth(3000);
 
+            try {
+                const snd = getHorseGameSound();
+                snd.resume().then(() => {
+                    try { snd.playCountNow(); } catch (e) { /* ignore */ }
+                });
+            } catch (e) { /* ignore */ }
+
             let sec = this.preStartSeconds;
             scene.time.addEvent({
                 delay: 1000,
                 repeat: this.preStartSeconds - 1,
                 callback: () => {
                     sec--;
-                    if (sec > 0) countdownText.setText(`${sec}초`);
+                    if (sec > 0) {
+                        countdownText.setText(`${sec}초`);
+                        try {
+                            const snd = getHorseGameSound();
+                            snd.resume().then(() => {
+                                try { snd.playCountNow(); } catch (e) { /* ignore */ }
+                            });
+                        } catch (e) { /* ignore */ }
+                    }
                 }
             });
 
             scene.time.delayedCall(this.preStartSeconds * 1000, () => {
+                try {
+                    const snd = getHorseGameSound();
+                    snd.resume().then(() => {
+                        try { snd.playGoNow(); } catch (e) { /* ignore */ }
+                    });
+                } catch (e) { /* ignore */ }
                 this.preStart = false;
                 this.raceStartAt = this.time.now || 0;
                 this.raceBoardElapsedFrozen = null;
@@ -2257,6 +2371,12 @@ class GameScene extends Phaser.Scene {
             // 성공 구간에서만 실제 점프 궤적 처리
             this.isJumping = true;
             this.isJumpingSuccess = true;
+            try {
+                const snd = getHorseGameSound();
+                snd.resume().then(() => {
+                    try { snd.jump(); } catch (e) { /* ignore */ }
+                });
+            } catch (e) { /* ignore */ }
 
             const startX = this.player.x;
             const obstacleWidth = nearest.sprite.displayWidth || 120;

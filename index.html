@@ -70,7 +70,8 @@ class HorseGameSound {
         this.master.gain.value = 0.4;
         this.master.connect(this.ctx.destination);
         this.running = false;
-        this.titleLoop = null;
+        this.titleBgmActive = false;
+        this.titleBgmTimeout = null;
         this.runLoop = null;
     }
 
@@ -91,28 +92,63 @@ class HorseGameSound {
         osc.stop(this.ctx.currentTime + duration);
     }
 
-    startTitleBGM() {
-        if (this.titleLoop != null) return;
-        const pattern = [
-            440, 440, 440, 440,
-            440, 440, 440, 440,
-            440, 0, 440, 0, 440, 0, 440
+    playTitleNote(freq, startOffset, duration, type = 'square', vol = 0.1) {
+        if (!freq || freq <= 0) return;
+        const t0 = this.ctx.currentTime + startOffset;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, t0);
+        gain.gain.setValueAtTime(vol, t0);
+        gain.gain.linearRampToValueAtTime(0, t0 + duration);
+        osc.connect(gain);
+        gain.connect(this.master);
+        osc.start(t0);
+        osc.stop(t0 + duration);
+    }
+
+    runTitleBGMChunk() {
+        if (!this.titleBgmActive) return;
+        const bpm = 160;
+        const step = 60 / bpm / 2;
+        let time = 0;
+        const sequence = [
+            440, 440, 523, 440, 587, 440, 523, 440,
+            659, 659, 784, 659, 880, 659, 784, 659,
+            880, 0, 880, 0, 784, 0, 659, 0,
+            523, 587, 659, 523, 440, 392, 440, 0
         ];
-        let i = 0;
-        this.titleLoop = setInterval(() => {
-            if (pattern[i] !== 0) {
-                this.tone(pattern[i], 0.08);
-                this.tone(pattern[i] / 2, 0.08, 'square', 0.15);
+        const bass = [
+            220, 220, 220, 220, 220, 220, 220, 220,
+            330, 330, 330, 330, 330, 330, 330, 330,
+            440, 440, 440, 440, 392, 392, 330, 330,
+            261, 261, 293, 293, 220, 220, 220, 220
+        ];
+        for (let i = 0; i < sequence.length; i++) {
+            if (sequence[i] > 0) {
+                this.playTitleNote(sequence[i], time, step * 0.5, 'square', 0.1);
             }
-            i++;
-            if (i >= pattern.length) i = 0;
-        }, 120);
+            if (bass[i] > 0) {
+                this.playTitleNote(bass[i], time, step * 0.8, 'square', 0.08);
+            }
+            time += step;
+        }
+        const durationMs = Math.max(0, time * 1000 - 20);
+        if (!this.titleBgmActive) return;
+        this.titleBgmTimeout = setTimeout(() => this.runTitleBGMChunk(), durationMs);
+    }
+
+    startTitleBGM() {
+        if (this.titleBgmActive) return;
+        this.titleBgmActive = true;
+        this.runTitleBGMChunk();
     }
 
     stopTitleBGM() {
-        if (this.titleLoop != null) {
-            clearInterval(this.titleLoop);
-            this.titleLoop = null;
+        this.titleBgmActive = false;
+        if (this.titleBgmTimeout != null) {
+            clearTimeout(this.titleBgmTimeout);
+            this.titleBgmTimeout = null;
         }
     }
 

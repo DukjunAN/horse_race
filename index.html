@@ -61,6 +61,101 @@ const SOCKET_URL =
     (_isLocalHost ? window.location.origin : 'https://horse-race-qo6o.onrender.com');
 const API_BASE_URL = (SOCKET_URL || window.location.origin).replace(/\/$/, '');
 
+const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+
+class HorseGameSound {
+    constructor() {
+        this.ctx = new AudioContextCtor();
+        this.master = this.ctx.createGain();
+        this.master.gain.value = 0.4;
+        this.master.connect(this.ctx.destination);
+        this.running = false;
+        this.titleLoop = null;
+        this.runLoop = null;
+    }
+
+    resume() {
+        if (this.ctx.state === 'suspended') return this.ctx.resume();
+        return Promise.resolve();
+    }
+
+    tone(freq, duration, type = 'square', volume = 0.3) {
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = type;
+        osc.frequency.value = freq;
+        gain.gain.value = volume;
+        osc.connect(gain);
+        gain.connect(this.master);
+        osc.start();
+        osc.stop(this.ctx.currentTime + duration);
+    }
+
+    startTitleBGM() {
+        if (this.titleLoop != null) return;
+        const pattern = [
+            440, 440, 440, 440,
+            440, 440, 440, 440,
+            440, 0, 440, 0, 440, 0, 440
+        ];
+        let i = 0;
+        this.titleLoop = setInterval(() => {
+            if (pattern[i] !== 0) {
+                this.tone(pattern[i], 0.08);
+                this.tone(pattern[i] / 2, 0.08, 'square', 0.15);
+            }
+            i++;
+            if (i >= pattern.length) i = 0;
+        }, 120);
+    }
+
+    stopTitleBGM() {
+        if (this.titleLoop != null) {
+            clearInterval(this.titleLoop);
+            this.titleLoop = null;
+        }
+    }
+
+    startRunning() {
+        if (this.running) return;
+        this.running = true;
+        this.runLoop = setInterval(() => {
+            this.tone(120, 0.04, 'square', 0.2);
+            setTimeout(() => {
+                this.tone(90, 0.04, 'square', 0.2);
+            }, 60);
+        }, 120);
+    }
+
+    stopRunning() {
+        this.running = false;
+        if (this.runLoop != null) {
+            clearInterval(this.runLoop);
+            this.runLoop = null;
+        }
+    }
+
+    jump() {
+        this.tone(600, 0.05);
+        setTimeout(() => this.tone(800, 0.05), 40);
+        setTimeout(() => this.tone(1000, 0.05), 80);
+    }
+
+    goal() {
+        const notes = [523, 659, 784, 1046];
+        notes.forEach((n, i) => {
+            setTimeout(() => {
+                this.tone(n, 0.2);
+            }, i * 150);
+        });
+    }
+}
+
+function getHorseGameSound() {
+    if (!window.horseGameSound) window.horseGameSound = new HorseGameSound();
+    return window.horseGameSound;
+}
+
 const TARGET_DISTANCE = 8000;
 /** AI(컴퓨터) 말 전진 속도 배율 — 기본 0.6~1.2에 곱해짐 */
 const AI_RUN_SPEED_MULTIPLIER = 1.8;
@@ -224,6 +319,21 @@ class TitleScene extends Phaser.Scene {
         const btnMulti = document.getElementById('btn-multi-start');
         const top3ListEl = document.getElementById('title-top3-list');
         input.value = localStorage.getItem('horse_nickname') || '';
+        const tryStartTitleBGM = () => {
+            if (!AudioContextCtor) return;
+            const snd = getHorseGameSound();
+            snd.resume().then(() => snd.startTitleBGM());
+        };
+        const onTitleAudioUnlock = () => tryStartTitleBGM();
+        title.addEventListener('pointerdown', onTitleAudioUnlock, { once: true });
+        input.addEventListener('focus', onTitleAudioUnlock, { once: true });
+        this.events.once('shutdown', () => {
+            title.removeEventListener('pointerdown', onTitleAudioUnlock);
+            input.removeEventListener('focus', onTitleAudioUnlock);
+            try {
+                if (window.horseGameSound) window.horseGameSound.stopTitleBGM();
+            } catch (e) { /* ignore */ }
+        });
         const renderTopTimes = (rows) => {
             if (!top3ListEl) return;
             const list = Array.isArray(rows) ? rows.slice(0, 3) : [];
